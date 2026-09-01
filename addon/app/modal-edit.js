@@ -176,6 +176,7 @@ const DEVICE_MQTT_MODELS = {
   "dockstream2_cordless": "plwf116",
   "dockstream_rfid":      "plwf305",
   "one_rfid":             "plaf301",
+  "polar":                "plaf109",
 };
 const DEVICE_VARIANTS = {
   "dockstream2":          [{ value: "b", label: "Black" }, { value: "w", label: "White" }],

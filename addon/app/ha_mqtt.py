@@ -23,6 +23,7 @@ _MODEL_NAMES = {
     "dockstream2_cordless": "Dockstream 2 Cordless Fountain",
     "dockstream_rfid":      "Dockstream RFID Smart Fountain",
     "one_rfid":             "One RFID Smart Feeder",
+    "polar":                "Polar Wet Food Feeder",
 }
 
 _FOUNTAIN_TYPES = {"dockstream2", "dockstream2_cordless", "dockstream_rfid"}

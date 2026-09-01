@@ -199,6 +199,9 @@ async def send_command(serial: str, payload: dict) -> bool:
         _LOGGER.warning("send_command: unknown serial %s...", serial[:6])
         return False
     _, device_type = _devices[serial]
+    if device_type == "polar":
+        _LOGGER.warning("Rejected unverified command for Polar device %s...", serial[:6])
+        return False
     topic = _service_sub_topic(device_type, serial)
     if _client_ref is None:
         _LOGGER.warning("send_command: no MQTT client")
@@ -218,6 +221,85 @@ async def send_command(serial: str, payload: dict) -> bool:
         return False
 
 
+_POLAR_MANUAL_PLAN_ID = 666666666
+
+
+async def send_polar_wet_feed(serial: str, plate: int, duration_minutes: int) -> bool:
+    """Start a confirmed PLAF109 wet-feeding plan.
+
+    The device treats this as a full plan replacement, so callers must present
+    a destructive-action warning and this must remain an experimental control.
+    """
+    global _client_ref
+    if _devices.get(serial, (None, ""))[1] != "polar":
+        raise ValueError("Polar wet-feed command sent to a non-Polar device")
+    if not isinstance(plate, int) or not 0 <= plate <= 6:
+        raise ValueError("Plate position must be between 0 and 6")
+    if not isinstance(duration_minutes, int) or not 1 <= duration_minutes <= 1440:
+        raise ValueError("Feeding duration must be between 1 and 1440 minutes")
+    if _client_ref is None:
+        return False
+
+    import datetime as _dt
+    import storage as _storage
+
+    tz = _dt.datetime.now().astimezone().tzinfo
+    tz_name = _storage.get_settings().get("feeder_timezone", "")
+    if tz_name:
+        try:
+            from zoneinfo import ZoneInfo
+            tz = ZoneInfo(tz_name)
+        except Exception:
+            pass
+    now = _dt.datetime.now(tz)
+    payload = {
+        "cmd": "WET_GRAIN_FEEDING_PLAN_SERVICE",
+        "msgId": f"{serial}_{int(now.timestamp() * 1000)}",
+        "ts": int(now.timestamp() * 1000),
+        "plans": [{
+            "planId": _POLAR_MANUAL_PLAN_ID,
+            "executionTime": now.strftime("%H:%M"),
+            "executionDay": now.strftime("%Y-%m-%d"),
+            "plate": plate,
+            "feedingDuration": duration_minutes,
+            "feedNowState": True,
+        }],
+    }
+    try:
+        await _client_ref.publish(_service_sub_topic("polar", serial), json.dumps(payload))
+        _LOGGER.warning("Experimental Polar wet-feed sent to %s... plate=%d duration=%dm", serial[:6], plate, duration_minutes)
+        return True
+    except Exception:
+        _LOGGER.exception("Experimental Polar wet-feed failed for %s...", serial[:6])
+        return False
+
+
+async def send_polar_plate_position(serial: str, plate_position: int) -> bool:
+    """Send the hardware-confirmed PLAF109 plate-position service."""
+    global _client_ref
+    if _devices.get(serial, (None, ""))[1] != "polar":
+        raise ValueError("Polar plate-position command sent to a non-Polar device")
+    if not isinstance(plate_position, int) or not 0 <= plate_position <= 6:
+        raise ValueError("Plate position must be between 0 and 6")
+    if _client_ref is None:
+        return False
+
+    import time
+    payload = {
+        "cmd": "SET_PLATE_POS_SERVICE",
+        "msgId": f"{serial}_{int(time.time() * 1000)}",
+        "ts": int(time.time() * 1000),
+        "platePosition": plate_position,
+    }
+    try:
+        await _client_ref.publish(_service_sub_topic("polar", serial), json.dumps(payload))
+        _LOGGER.warning("Experimental Polar plate-position sent to %s... position=%d", serial[:6], plate_position)
+        return True
+    except Exception:
+        _LOGGER.exception("Experimental Polar plate-position failed for %s...", serial[:6])
+        return False
+
+
 async def send_display(serial: str, display_text: str, display_icon: int) -> bool:
     """Push display content to the feeder via MQTT.
 
@@ -232,6 +314,9 @@ async def send_display(serial: str, display_text: str, display_icon: int) -> boo
         _LOGGER.warning("send_display: unknown serial %s...", serial[:6])
         return False
     _, device_type = _devices[serial]
+    if device_type == "polar":
+        _LOGGER.warning("Rejected unverified display command for Polar device %s...", serial[:6])
+        return False
     topic = _service_sub_topic(device_type, serial)
     if _client_ref is None:
         _LOGGER.warning("send_display: no MQTT client")
@@ -337,6 +422,9 @@ async def send_feeding_plans(serial: str, plans: list) -> bool:
         _LOGGER.warning("send_feeding_plans: unknown serial %s...", serial[:6])
         return False
     _, device_type = _devices[serial]
+    if device_type == "polar":
+        _LOGGER.warning("Rejected unverified feeding-plan update for Polar device %s...", serial[:6])
+        return False
     topic = _service_sub_topic(device_type, serial)
     if _client_ref is None:
         _LOGGER.warning("send_feeding_plans: no MQTT client")
@@ -568,8 +656,33 @@ async def _handle_ha_command(serial: str, topic: str, payload: str):
         _LOGGER.debug("HA command %s... keys=%s", serial[:6], list(cmd.keys()))
 
 
-async def handle_ha_command(serial: str, cmd: dict) -> None:
+async def handle_ha_command(serial: str, cmd: dict) -> bool | None:
     """Public entry-point for API-driven commands (already-parsed dict)."""
+    device_type = _devices.get(serial, (None, ""))[1]
+    if device_type == "polar":
+        if "_polar_serve_plate" in cmd:
+            action = cmd["_polar_serve_plate"]
+            if not isinstance(action, dict):
+                raise ValueError("Polar serve command must be an object")
+            plate = action.get("plate")
+            duration = action.get("duration_minutes")
+            if not isinstance(plate, int) or not isinstance(duration, int):
+                raise ValueError("Polar serve command requires integer plate and duration_minutes")
+            return await send_polar_wet_feed(serial, plate, duration)
+        if "_polar_open_lid" in cmd:
+            action = cmd["_polar_open_lid"]
+            if not isinstance(action, dict):
+                raise ValueError("Polar lid command must be an object")
+            duration = action.get("duration_minutes")
+            if not isinstance(duration, int):
+                raise ValueError("Polar lid command requires an integer duration_minutes")
+            return await send_polar_wet_feed(serial, 0, duration)
+        if "_polar_set_plate_position" in cmd:
+            position = cmd["_polar_set_plate_position"]
+            if not isinstance(position, int):
+                raise ValueError("Polar plate position must be an integer")
+            return await send_polar_plate_position(serial, position)
+        raise ValueError("Only experimental Polar controls are supported")
     if cmd.get("_feed_now"):
         ok = await send_command(serial, {"cmd": "MANUAL_FEEDING_SERVICE", "grainNum": 1})
         _LOGGER.info("API Feed Now %s...: %s", serial[:6], "ok" if ok else "failed")
@@ -640,6 +753,12 @@ def _handle_message(serial: str, topic_str: str, raw: str):
         code = data.get("code")
         plans = data.get("plans", [])
         _LOGGER.info("FEEDING_PLAN_SERVICE ack from %s...: code=%s plans=%s", serial[:6], code, json.dumps(plans))
+        _mark_online(serial)
+        asyncio.ensure_future(_check_and_fire_alerts(serial))
+        return
+
+    if cmd in ("WET_GRAIN_FEEDING_PLAN_SERVICE", "SET_PLATE_POS_SERVICE"):
+        _LOGGER.info("Experimental Polar service ack from %s... cmd=%s code=%s", serial[:6], cmd, data.get("code"))
         _mark_online(serial)
         asyncio.ensure_future(_check_and_fire_alerts(serial))
         return
@@ -915,6 +1034,9 @@ async def _respond_feeding_plan(serial: str, request_topic: str) -> None:
     import time as _time
     global _client_ref
     if _client_ref is None:
+        return
+    if _devices.get(serial, (None, ""))[1] == "polar":
+        _LOGGER.warning("Ignoring unverified Polar feeding-plan request from %s...", serial[:6])
         return
     response_topic = request_topic.replace("/post", "/sub")
     # Respond with GET_FEEDING_PLAN_EVENT + stored plans. Empty list is fine — feeder

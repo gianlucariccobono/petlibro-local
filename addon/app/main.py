@@ -393,7 +393,9 @@ async def handle_api_device_command(request):
         # Route through handle_ha_command so underscore-prefixed keys
         # (_display_frame, _display_text, _feed_now, etc.) are handled correctly.
         # Normal command dicts fall through to send_command inside that function.
-        await devices.handle_ha_command(serial, payload)
+        result = await devices.handle_ha_command(serial, payload)
+        if result is False:
+            return web.Response(status=503, text="Device is offline or did not accept the command")
         return web.json_response({"status": "ok"})
     except Exception:
         _LOGGER.exception("Command failed for %s...", serial[:6])
@@ -747,11 +749,15 @@ async def handle_api_pet_image_upload(request):
 
 async def handle_api_feeding_plans_get(request):
     serial = request.match_info["serial"]
+    if storage.get_devices().get(serial, {}).get("device_type") == "polar":
+        return web.Response(status=409, text="Polar feeding plans are not yet hardware-verified")
     return web.json_response(storage.get_device_feeding_plans(serial))
 
 
 async def handle_api_feeding_plans_post(request):
     serial = request.match_info["serial"]
+    if storage.get_devices().get(serial, {}).get("device_type") == "polar":
+        return web.Response(status=409, text="Polar feeding plans are not yet hardware-verified")
     try:
         plans = await request.json()
         if not isinstance(plans, list):

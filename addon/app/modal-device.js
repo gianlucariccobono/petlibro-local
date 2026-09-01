@@ -222,6 +222,38 @@ function buildOverviewTab(device) {
     </div>` : ""}`;
   }
 
+  if (device.device_type === "polar") {
+    return `<div class="detail-stats">
+      <div class="detail-stat">
+        <div class="detail-stat-label">${t("overview.status")}</div>
+        <div class="detail-stat-value accent">${t("overview.experimental")}</div>
+      </div>
+    </div>
+    <p class="form-hint" style="margin-top:16px">${t("overview.polar_warning")}</p>
+    <div style="margin-top:16px">
+      <div class="tab-section-heading">${t("overview.polar_controls")}</div>
+      <div class="form-row">
+        <label class="form-label">${t("overview.polar_plate")}</label>
+        <input class="form-input" id="polar-serve-plate" type="number" min="1" max="6" value="1">
+      </div>
+      <div class="form-row">
+        <label class="form-label">${t("overview.polar_duration")}</label>
+        <input class="form-input" id="polar-serve-duration" type="number" min="1" max="1440" value="240">
+      </div>
+      <button class="btn-primary" id="btn-polar-serve" style="width:100%">${t("overview.polar_serve")}</button>
+      <div class="form-row" style="margin-top:16px">
+        <label class="form-label">${t("overview.polar_lid_duration")}</label>
+        <input class="form-input" id="polar-lid-duration" type="number" min="1" max="1440" value="240">
+      </div>
+      <button class="btn-secondary" id="btn-polar-open-lid" style="width:100%">${t("overview.open_lid")}</button>
+      <div class="form-row" style="margin-top:16px">
+        <label class="form-label">${t("overview.polar_position")}</label>
+        <input class="form-input" id="polar-plate-position" type="number" min="0" max="6" value="0">
+      </div>
+      <button class="btn-secondary" id="btn-polar-set-position" style="width:100%">${t("overview.polar_set_position")}</button>
+    </div>`;
+  }
+
   return `<div class="detail-stats">
     <div class="detail-stat">
       <div class="detail-stat-label">${t("overview.water_level")}</div>
@@ -319,6 +351,26 @@ function buildControlsTab(device) {
 
 // ── Maintenance tab ───────────────────────────────────────────────────────
 function buildMaintenanceTab(device) {
+  if (device.device_type === "polar") {
+    const bowlDays = bowlDaysRemaining(device);
+    const bowlColor = bowlDays != null && bowlDays <= 0 ? "var(--pl-danger)" : "var(--pl-accent)";
+    return `
+    <div class="tab-section-heading">${t("maint.bowl")}</div>
+    <p class="form-hint">${t("maint.local_reminder")}</p>
+    <div style="display:flex;align-items:center;gap:8px;margin-bottom:10px">
+      <span style="font-size:13px;color:var(--pl-subtext);white-space:nowrap">${t("maint.next_clean_in")}</span>
+      <input class="form-input" id="maint-bowl-days" type="number" min="0" max="365"
+        value="${bowlDays != null ? Math.max(0, Math.round(bowlDays)) : ""}"
+        placeholder="${bowlDays != null ? "" : t("maint.bowl_not_set")}"
+        style="max-width:90px;color:${bowlColor}">
+    </div>
+    <label class="form-label">${t("maint.bowl_clean_every")}</label>
+    <div style="display:flex;gap:8px;margin-bottom:18px">
+      <input class="form-input" id="maint-bowl-interval" type="number" min="1" max="90" value="${device.bowl_cleaning_interval_days ?? 7}" style="flex:1">
+      <button class="btn-secondary" id="btn-record-bowl" style="flex-shrink:0">${t("maint.record_bowl")}</button>
+    </div>`;
+  }
+
   if (device.device_type === "one_rfid") {
     const dDays    = desiccantDaysRemaining(device);
     const bowlDays = bowlDaysRemaining(device);
@@ -794,7 +846,10 @@ function wireScheduleTabHandlers() {
 function buildNotificationsTab(device) {
   const notif = device.notifications || {};
   const isFeeder = device.device_type === "one_rfid";
-  const checks = isFeeder ? [
+  const checks = device.device_type === "polar" ? [
+    { key: "bowl_due",      label: t("notif.bowl_due") },
+    { key: "offline",       label: t("notif.offline") },
+  ] : isFeeder ? [
     { key: "food_low",      label: t("notif.food_low") },
     { key: "desiccant_due", label: t("notif.desiccant_due") },
     { key: "bowl_due",      label: t("notif.bowl_due") },
@@ -935,6 +990,43 @@ function wireDeviceTabHandlers(tabName) {
     }
   }
   else if (tabName === "overview") {
+    if (d.device_type === "polar") {
+      const runPolarAction = async (button, payload, confirmation) => {
+        if (!confirm(confirmation)) return;
+        const original = button.textContent;
+        button.textContent = t("overview.sending");
+        button.disabled = true;
+        try {
+          await api("POST", `/api/devices/${d.serial}/command`, payload);
+          button.textContent = t("overview.sent");
+        } catch (e) {
+          button.textContent = t("overview.failed");
+          alert(t("overview.cmd_failed", {error: e.message}));
+        }
+        setTimeout(() => { button.textContent = original; button.disabled = false; }, 2500);
+      };
+      const serve = document.getElementById("btn-polar-serve");
+      if (serve) serve.onclick = () => {
+        const plate = parseInt(document.getElementById("polar-serve-plate").value);
+        const duration_minutes = parseInt(document.getElementById("polar-serve-duration").value);
+        runPolarAction(serve, { _polar_serve_plate: { plate, duration_minutes } },
+          t("overview.polar_confirm_serve", {plate, duration: duration_minutes}));
+      };
+      const openLid = document.getElementById("btn-polar-open-lid");
+      if (openLid) openLid.onclick = () => {
+        const duration_minutes = parseInt(document.getElementById("polar-lid-duration").value);
+        runPolarAction(openLid, { _polar_open_lid: { duration_minutes } },
+          t("overview.polar_confirm_lid", {duration: duration_minutes}));
+      };
+      const setPosition = document.getElementById("btn-polar-set-position");
+      if (setPosition) setPosition.onclick = () => {
+        const position = parseInt(document.getElementById("polar-plate-position").value);
+        runPolarAction(setPosition, { _polar_set_plate_position: position },
+          t("overview.polar_confirm_position", {position}));
+      };
+      return;
+    }
+
     // Feeder controls
     const feedNow = document.getElementById("btn-feed-now");
     const openLid = document.getElementById("btn-open-lid");

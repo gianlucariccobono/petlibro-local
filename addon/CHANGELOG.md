@@ -3,6 +3,7 @@
 For full release notes and details on each version, see the [GitHub Releases page](https://github.com/smcneece/petlibro-local/releases).
 
 ## Unreleased
+- Added Polar Wet Food Feeder (MQTT model `PLAF109`) monitoring plus explicitly warned experimental controls to serve a plate, open the lid for a timed interval, and set plate position. Serving or opening the lid replaces the feeder's stored schedule, so it requires confirmation and direct observation. Direct door control, schedules, and settings remain disabled.
 
 ## 2026.08.8
 - Fixed the fountain Controls tab kicking you back to Overview after toggling Pump, Light, or the filter indicator light. The action itself always worked, the tab display just didn't know it had moved off Overview

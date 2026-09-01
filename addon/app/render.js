@@ -64,6 +64,7 @@ function renderDevices() {
     const online = d.online;
     const statusClass = online ? "online" : "offline";
     const isFeeder = d.device_type === "one_rfid";
+    const isPolar = d.device_type === "polar";
     const water = fmtWater(d.currentWeight ?? null);
     const filterDays = filterDaysRemaining(d);
     const cleanDays = cleaningDaysRemaining(d);
@@ -85,7 +86,7 @@ function renderDevices() {
     ).join("") + (petOverflow > 0 ? `<div class="card-pet-avatar card-pet-overflow">+${petOverflow}</div>` : "");
     const alerts = deviceAlerts(d);
     const alertDot = alerts.length ? `<div class="card-alert" title="${alerts.join(', ')}">!</div>` : "";
-    const intakeHtml = !isFeeder && d.intake_today_grams > 0
+    const intakeHtml = !isFeeder && !isPolar && d.intake_today_grams > 0
       ? `<div class="card-intake">${escHtml(t("time.today"))}: ${escHtml(fmtWater(d.intake_today_grams))}</div>`
       : "";
     const cleanStat = cleanDays != null
@@ -122,7 +123,16 @@ function renderDevices() {
           ${(() => { const nm = nextMealLabel(d.feeding_plans); return nm ? `<div class="card-stat"><div class="stat-label">${t("card.next_meal")}</div><div class="stat-value">${escHtml(nm)}</div></div>` : ""; })()}
           ${(() => { if (!d.last_fed_ts) return ""; const lf = new Date(d.last_fed_ts * 1000); const now = new Date(); const diffH = (now - lf) / 3600000; let label; if (diffH < 1) label = t("time.ago_minutes", {n: Math.round(diffH * 60)}); else if (diffH < 24) label = _fmt12h(lf.getHours(), lf.getMinutes()); else label = t(_WDAY_KEYS[lf.getDay()]) + " " + _fmt12h(lf.getHours(), lf.getMinutes()); return `<div class="card-stat"><div class="stat-label">${t("card.last_fed")}</div><div class="stat-value">${escHtml(label)}</div></div>`; })()}
           ${(() => { const lbl = _fmtDisplayLabel(d); if (!lbl) return ""; const short = lbl.length > 9 ? lbl.slice(0, 8) + "…" : lbl; return `<div class="card-stat stat-secondary"><div class="stat-label">${t("card.display")}</div><div class="stat-value" title="${escHtml(lbl)}">${escHtml(short)}</div></div>`; })()}
-          ` : `
+          ` : isPolar ? `
+           <div class="card-stat">
+             <div class="stat-label">${t("card.bowl")}</div>
+             <div class="stat-value">${escHtml(fmtDays(bowlDaysRemaining(d)))}</div>
+           </div>
+           <div class="card-stat stat-secondary">
+             <div class="stat-label">${t("card.status")}</div>
+             <div class="stat-value">${t("card.monitoring")}</div>
+           </div>
+           ` : `
           <div class="card-stat">
             <div class="stat-label">${t("card.water")}</div>
             <div class="stat-value accent">${escHtml(water)}</div>

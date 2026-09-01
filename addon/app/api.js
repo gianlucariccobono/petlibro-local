@@ -27,6 +27,8 @@ function deviceAlerts(device) {
     if (notif.food_low !== false && device.online && device.surplusGrain === false) alerts.push("food_low");
     if (notif.bowl_due !== false) { const d = bowlDaysRemaining(device); if (d != null && d <= 0) alerts.push("bowl_due"); }
     if (notif.housing_due !== false) { const d = housingDaysRemaining(device); if (d != null && d <= 0) alerts.push("housing_due"); }
+  } else if (device.device_type === "polar") {
+    if (notif.bowl_due !== false) { const d = bowlDaysRemaining(device); if (d != null && d <= 0) alerts.push("bowl_due"); }
   } else {
     if (notif.water_low !== false) {
       const threshold = device.lowWater ?? device.low_water_grams ?? 500;
