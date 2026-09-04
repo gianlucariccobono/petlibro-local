@@ -671,6 +671,13 @@ async def _handle_ha_command(serial: str, topic: str, payload: str):
     if cmd is None:
         _LOGGER.warning("Unrecognised HA command topic: %s", topic)
         return
+    if device_type == "polar":
+        try:
+            ok = await handle_ha_command(serial, cmd)
+            _LOGGER.info("HA Polar command %s...: %s", serial[:6], "ok" if ok else "failed")
+        except ValueError as exc:
+            _LOGGER.warning("HA Polar command rejected for %s...: %s", serial[:6], exc)
+        return
     if cmd.get("_feed_now"):
         ok = await send_command(serial, {"cmd": "MANUAL_FEEDING_SERVICE", "grainNum": 1})
         _LOGGER.info("HA Feed Now %s...: %s", serial[:6], "ok" if ok else "failed")
