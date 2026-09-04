@@ -327,10 +327,6 @@ def _validate_polar_plans(plans: list):
 async def send_polar_feeding_plans(serial: str, plans: list) -> bool:
     """Replace the complete PLAF109 plan list using the vendor's clear-then-set flow."""
     _validate_polar_plans(plans)
-    # Clearing stored plans is safe even while the current manual feed is
-    # running. Adding/replacing future plans still waits for GRAIN_END.
-    if plans and _polar_feed_active(serial):
-        raise ValueError("Wait for the current Polar feed to finish before changing plans")
     if not await _send_polar_service(serial, "WET_GRAIN_FEEDING_PLAN_SERVICE", plans=[]):
         return False
     return not plans or await _send_polar_service(
