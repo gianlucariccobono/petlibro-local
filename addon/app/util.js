@@ -173,6 +173,45 @@ function _localToUtc(hhmm) {
   return `${String(Math.floor(mins / 60)).padStart(2, "0")}:${String(mins % 60).padStart(2, "0")}`;
 }
 
+function _zonedParts(date, timeZone) {
+  const parts = new Intl.DateTimeFormat("en-CA", {
+    timeZone, year: "numeric", month: "2-digit", day: "2-digit",
+    hour: "2-digit", minute: "2-digit", hourCycle: "h23",
+  }).formatToParts(date);
+  return Object.fromEntries(parts.filter(p => p.type !== "literal").map(p => [p.type, p.value]));
+}
+
+function _zonedOffsetMs(date, timeZone) {
+  const parts = _zonedParts(date, timeZone);
+  return Date.UTC(parts.year, +parts.month - 1, parts.day, parts.hour, parts.minute) - date.getTime();
+}
+
+// Polar uses executionDay and executionTime as a single UTC timestamp. Keep
+// browser inputs in the configured feeder timezone, including DST on that day.
+function _polarLocalPlanToUtc(day, hhmm) {
+  const [year, month, date] = day.split("-").map(Number);
+  const [hour, minute] = hhmm.split(":").map(Number);
+  const timeZone = _settings.feeder_timezone || Intl.DateTimeFormat().resolvedOptions().timeZone;
+  const wallTimeMs = Date.UTC(year, month - 1, date, hour, minute);
+  let instant = new Date(wallTimeMs - _zonedOffsetMs(new Date(wallTimeMs), timeZone));
+  // The offset can change at the target instant during a DST transition.
+  instant = new Date(wallTimeMs - _zonedOffsetMs(instant, timeZone));
+  return {
+    executionDay: instant.toISOString().slice(0, 10),
+    executionTime: instant.toISOString().slice(11, 16),
+  };
+}
+
+function _polarUtcPlanToLocal(day, hhmm) {
+  const instant = new Date(`${day}T${hhmm}:00Z`);
+  const timeZone = _settings.feeder_timezone || Intl.DateTimeFormat().resolvedOptions().timeZone;
+  const parts = _zonedParts(instant, timeZone);
+  return {
+    executionDay: `${parts.year}-${parts.month}-${parts.day}`,
+    executionTime: `${parts.hour}:${parts.minute}`,
+  };
+}
+
 // Rounded, not floored: a value just saved as "N days" is always read back a
 // few milliseconds later, so flooring would show N-1 essentially every time
 // (20.99999 days floors to 20 even though nothing meaningfully elapsed).

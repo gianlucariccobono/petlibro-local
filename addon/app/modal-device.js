@@ -243,7 +243,7 @@ function buildOverviewTab(device) {
       </div>
       <div class="form-row">
         <label class="form-label">${t("overview.polar_duration")}</label>
-        <input class="form-input" id="polar-serve-duration" type="number" min="1" max="86400" value="240">
+        <input class="form-input" id="polar-serve-duration" type="number" min="1" max="1440" value="240">
       </div>
       <button class="btn-primary" id="btn-polar-serve" style="width:100%">${t("overview.polar_serve")}</button>
       <div style="display:flex;gap:8px;margin-top:8px">
@@ -714,14 +714,18 @@ function buildScheduleTab(plans) {
 }
 
 function buildPolarScheduleTab(plans) {
-  const order = plans.map((_, i) => i).sort((a, b) =>
-    `${plans[a].executionDay || ""} ${plans[a].executionTime || ""}`.localeCompare(`${plans[b].executionDay || ""} ${plans[b].executionTime || ""}`)
-  );
+  const localPlan = plan => _polarUtcPlanToLocal(plan.executionDay || "1970-01-01", plan.executionTime || "00:00");
+  const order = plans.map((_, i) => i).sort((a, b) => {
+    const left = localPlan(plans[a]);
+    const right = localPlan(plans[b]);
+    return `${left.executionDay} ${left.executionTime}`.localeCompare(`${right.executionDay} ${right.executionTime}`);
+  });
   const rows = order.map(i => {
     const plan = plans[i];
+    const local = localPlan(plan);
     return `<div class="sched-row" data-idx="${i}">
-      <div class="sched-time">${escHtml(plan.executionDay || "")}</div>
-      <div class="sched-meta">${escHtml(plan.executionTime || "")} · ${t("schedule.polar_plate", {plate: plan.plate})} · ${t("schedule.polar_duration", {seconds: plan.feedingDuration})}</div>
+      <div class="sched-time">${escHtml(local.executionDay)}</div>
+      <div class="sched-meta">${escHtml(local.executionTime)} · ${t("schedule.polar_plate", {plate: plan.plate})} · ${t("schedule.polar_duration", {minutes: plan.feedingDuration})}</div>
       <div class="sched-actions"><button class="sched-del-btn" data-idx="${i}" title="Delete" style="background:none;border:none;cursor:pointer;padding:4px;color:var(--pl-danger,#e05252);font-size:16px;line-height:1;opacity:0.8">&#x2715;</button></div>
     </div>`;
   }).join("");
@@ -733,9 +737,10 @@ function buildPolarScheduleTab(plans) {
       <div class="form-row"><label>${t("schedule.polar_date")}</label><input type="date" class="form-input" id="ps-date" value="${today}"></div>
       <div class="form-row"><label>${t("schedule.time")}</label><input type="time" class="form-input" id="ps-time" value="08:00"></div>
       <div class="form-row"><label>${t("schedule.polar_plate_label")}</label><input type="number" class="form-input" id="ps-plate" min="1" max="3" value="1"></div>
-      <div class="form-row"><label>${t("schedule.polar_duration_label")}</label><input type="number" class="form-input" id="ps-duration" min="1" max="86400" value="240"></div>
-      <button class="btn-primary" id="ps-add" style="width:100%">${t("schedule.add")}</button>
+      <div class="form-row"><label>${t("schedule.polar_duration_label")}</label><input type="number" class="form-input" id="ps-duration" min="1" max="1440" value="240"></div>
+      <button class="btn-primary" id="ps-add" style="width:100%" ${plans.length >= 3 ? "disabled" : ""}>${t("schedule.add")}</button>
     </div>
+    ${plans.length >= 3 ? `<p class="form-hint">${t("schedule.polar_limit")}</p>` : ""}
     <div class="sched-list" id="polar-sched-list">${rows || `<p style="color:var(--pl-subtext);text-align:center;padding:12px 0">${t("schedule.no_plans")}</p>`}</div>
     <div style="display:flex;gap:8px;margin-top:10px">
       <button class="btn-secondary" id="ps-refresh" style="flex:1">${t("schedule.polar_refresh")}</button>
@@ -754,6 +759,10 @@ function wirePolarScheduleTabHandlers() {
     wirePolarScheduleTabHandlers();
   };
   document.getElementById("ps-add").onclick = async () => {
+    if (_schedPlans.length >= 3) {
+      alert(t("schedule.polar_limit"));
+      return;
+    }
     const executionDay = document.getElementById("ps-date").value;
     const executionTime = document.getElementById("ps-time").value;
     const plate = parseInt(document.getElementById("ps-plate").value);
@@ -767,9 +776,10 @@ function wirePolarScheduleTabHandlers() {
     do {
       planId = 100000000 + Math.floor(Math.random() * 900000000);
     } while (planIds.has(planId));
+    const utc = _polarLocalPlanToUtc(executionDay, executionTime);
     _schedPlans.push({
       planId,
-      executionDay, executionTime, plate, feedingDuration,
+      ...utc, plate, feedingDuration,
     });
     try {
       await _savePolarSchedule();
@@ -1114,9 +1124,9 @@ function wireDeviceTabHandlers(tabName) {
       const serve = document.getElementById("btn-polar-serve");
       if (serve) serve.onclick = () => {
         const plate = parseInt(document.getElementById("polar-serve-plate").value);
-        const duration_seconds = parseInt(document.getElementById("polar-serve-duration").value);
-        runPolarAction(serve, { _polar_serve_plate: { plate, duration_seconds } },
-          t("overview.polar_confirm_serve", {plate, duration: duration_seconds}));
+        const duration_minutes = parseInt(document.getElementById("polar-serve-duration").value);
+        runPolarAction(serve, { _polar_serve_plate: { plate, duration_minutes } },
+          t("overview.polar_confirm_serve", {plate, duration: duration_minutes}));
       };
       const stop = document.getElementById("btn-polar-stop");
       if (stop) stop.onclick = () => runPolarAction(stop, { _polar_stop_feed: true }, t("overview.polar_confirm_stop"));

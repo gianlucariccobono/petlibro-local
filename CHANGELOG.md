@@ -4,7 +4,7 @@ For full release notes and details on each version, see the [GitHub Releases pag
 
 ## Unreleased
 - Added confirmed local controls for the Polar Wet Food Feeder (MQTT model `PLAF109`): serve plates 1-3, stop an active feed, open or close the lid, set the plate position, and request plan readback. These controls are also exposed to Home Assistant through MQTT Discovery.
-- Added Polar one-time dated feeding-plan management. The App uses the vendor-confirmed clear-then-replace protocol and prevents plan changes while a feed is active.
+- Added Polar one-time dated feeding-plan management for up to three independent plans. The App uses the vendor-confirmed clear-then-replace protocol, blocks non-empty plan changes while a feed is active, and always allows clearing plans.
 - Blocked Polar plate position 0 after hardware testing showed it can cause continuous rotation. Cooling, sound, and other unobserved commands remain unavailable.
 
 ## 2026.08.8

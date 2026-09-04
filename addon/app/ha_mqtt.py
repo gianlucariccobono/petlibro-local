@@ -544,7 +544,7 @@ def parse_command(topic: str, payload: str, device_type: str = "") -> dict | Non
                 plate = int(key.rsplit("_", 1)[1])
             except ValueError:
                 return None
-            return {"_polar_serve_plate": {"plate": plate, "duration_seconds": 240}}
+            return {"_polar_serve_plate": {"plate": plate, "duration_minutes": 240}}
         if key == "stop_feed":
             return {"_polar_stop_feed": True}
         if key == "open_lid":

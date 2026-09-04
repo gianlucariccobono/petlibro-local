@@ -257,32 +257,23 @@ async def _send_polar_service(serial: str, command: str, **payload) -> bool:
         return False
 
 
-async def send_polar_wet_feed(serial: str, plate: int, duration_seconds: int) -> bool:
+async def send_polar_wet_feed(serial: str, plate: int, duration_minutes: int) -> bool:
     """Start a documented PLAF109 manual wet-food feed."""
     _validate_polar_plate(plate)
-    if not isinstance(duration_seconds, int) or not 1 <= duration_seconds <= 86400:
-        raise ValueError("Feeding duration must be between 1 and 86400 seconds")
+    if not isinstance(duration_minutes, int) or not 1 <= duration_minutes <= 1440:
+        raise ValueError("Feeding duration must be between 1 and 1440 minutes")
     if _polar_feed_active(serial):
         raise ValueError("Wait for the current Polar feed to finish before starting another")
 
     import datetime as _dt
-    import storage as _storage
 
-    tz = _dt.datetime.now().astimezone().tzinfo
-    tz_name = _storage.get_settings().get("feeder_timezone", "")
-    if tz_name:
-        try:
-            from zoneinfo import ZoneInfo
-            tz = ZoneInfo(tz_name)
-        except Exception:
-            pass
-    now = _dt.datetime.now(tz)
+    now = _dt.datetime.now(_dt.timezone.utc)
     ok = await _send_polar_service(serial, "WET_GRAIN_FEEDING_PLAN_SERVICE", plans=[{
         "planId": _POLAR_MANUAL_PLAN_ID,
         "executionTime": now.strftime("%H:%M"),
         "executionDay": now.strftime("%Y-%m-%d"),
         "plate": plate,
-        "feedingDuration": duration_seconds,
+        "feedingDuration": duration_minutes,
         "feedNowState": True,
     }])
     if ok:
@@ -310,6 +301,8 @@ async def send_polar_open_door(serial: str) -> bool:
 def _validate_polar_plans(plans: list):
     if not isinstance(plans, list):
         raise ValueError("Polar plans must be a list")
+    if len(plans) > 3:
+        raise ValueError("Polar supports at most three scheduled plans")
     plan_ids = set()
     for plan in plans:
         if not isinstance(plan, dict):
@@ -327,14 +320,16 @@ def _validate_polar_plans(plans: list):
         except ValueError as exc:
             raise ValueError("Plan execution time or day is invalid") from exc
         duration = plan.get("feedingDuration")
-        if not isinstance(duration, int) or not 1 <= duration <= 86400:
-            raise ValueError("Plan feedingDuration must be between 1 and 86400 seconds")
+        if not isinstance(duration, int) or not 1 <= duration <= 1440:
+            raise ValueError("Plan feedingDuration must be between 1 and 1440 minutes")
 
 
 async def send_polar_feeding_plans(serial: str, plans: list) -> bool:
     """Replace the complete PLAF109 plan list using the vendor's clear-then-set flow."""
     _validate_polar_plans(plans)
-    if _polar_feed_active(serial):
+    # Clearing stored plans is safe even while the current manual feed is
+    # running. Adding/replacing future plans still waits for GRAIN_END.
+    if plans and _polar_feed_active(serial):
         raise ValueError("Wait for the current Polar feed to finish before changing plans")
     if not await _send_polar_service(serial, "WET_GRAIN_FEEDING_PLAN_SERVICE", plans=[]):
         return False
@@ -738,9 +733,9 @@ async def handle_ha_command(serial: str, cmd: dict) -> bool | None:
             if not isinstance(action, dict):
                 raise ValueError("Polar serve command must be an object")
             plate = action.get("plate")
-            duration = action.get("duration_seconds")
+            duration = action.get("duration_minutes")
             if not isinstance(plate, int) or not isinstance(duration, int):
-                raise ValueError("Polar serve command requires integer plate and duration_seconds")
+                raise ValueError("Polar serve command requires integer plate and duration_minutes")
             return await send_polar_wet_feed(serial, plate, duration)
         if cmd.get("_polar_stop_feed"):
             return await send_polar_stop_feed(serial)
