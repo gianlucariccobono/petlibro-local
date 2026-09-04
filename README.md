@@ -43,7 +43,7 @@ If you are not comfortable with these terms, do not use this software.
 | Dockstream 2 Cordless Fountain (white) | WF04...BA... (inferred) | PLWF116 | Beta |
 | Dockstream RFID Smart Fountain | WF02 | PLWF305 | Beta |
 | One RFID Smart Feeder | AF06 | PLAF301 | Supported |
-| Polar Wet Food Feeder | Unknown | PLAF109 | Monitoring only |
+| Polar Wet Food Feeder | Unknown | PLAF109 | Local controls and one-time dated plans |
 
 **Color variant encoding:** On the Dockstream 2, I think the serial number encodes the color variant. The characters at positions 10–11 appear to indicate color: `BD` = black, `BA` = white. If other owners of the Dockstream 2 fountains could also let me know by opening an issue.
 
@@ -53,7 +53,7 @@ If you are not comfortable with these terms, do not use this software.
 
 **One RFID Smart Feeder:** Significantly different from the fountain: RFID door, desiccant tray, feeding plan, display matrix, sound, and lid controls. Serial prefix confirmed as `AF06`, MQTT model confirmed as `PLAF301`. Color variant does not appear to be encoded at positions 10–11 the way fountain serials are. Note that Petlibro's product listing shows this device as model `PLAF103`; that's the retail box/product number and is unrelated to `PLAF301`, which is the MQTT topic model this app matches on. Serials on newer hardware revisions run a few characters longer than early units but use the same `AF06` prefix and work the same way.
 
-**Polar Wet Food Feeder:** MQTT model `PLAF109` is confirmed. This App provides connection monitoring, signal/firmware diagnostics, an app-local bowl-cleaning reminder, and explicitly warned experimental controls for serving a plate, opening the lid for a timed interval, and setting plate position. Serving or opening the lid uses the confirmed wet-plan command and replaces the feeder's stored schedule; keep the feeder under observation. Direct door control, schedules, sound, and other settings remain unavailable. Its serial prefix and color variants are not yet confirmed.
+**Polar Wet Food Feeder:** MQTT model `PLAF109` is confirmed. This App provides connection monitoring, signal/firmware diagnostics, an app-local bowl-cleaning reminder, manual serving for plates 1-3, direct lid open/close, stop-feed, and plate positioning. It also manages the device's one-time dated feeding plans using the vendor's clear-then-replace protocol and can request a readback of its known plan IDs. A feed or plate move is blocked until the current feed emits its completion event. Plate position `0` remains blocked because hardware testing caused continuous rotation. Cooling, sound, and other unobserved services remain unavailable. Its serial prefix and color variants are not yet confirmed.
 
 Additional devices can be added by contributing a device type entry, the MQTT model string (the topic prefix after `dl/`), and the serial number prefix used for auto-detection during capture. The MQTT topic structure is consistent across the Petlibro product line.
 

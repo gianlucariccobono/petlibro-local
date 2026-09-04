@@ -3,7 +3,9 @@
 For full release notes and details on each version, see the [GitHub Releases page](https://github.com/smcneece/petlibro-local/releases).
 
 ## Unreleased
-- Added Polar Wet Food Feeder (MQTT model `PLAF109`) monitoring plus explicitly warned experimental controls to serve a plate, open the lid for a timed interval, and set plate position. Serving or opening the lid replaces the feeder's stored schedule, so it requires confirmation and direct observation. Direct door control, schedules, and settings remain disabled.
+- Added confirmed local controls for the Polar Wet Food Feeder (MQTT model `PLAF109`): serve plates 1-3, stop an active feed, open or close the lid, set the plate position, and request plan readback. These controls are also exposed to Home Assistant through MQTT Discovery.
+- Added Polar one-time dated feeding-plan management. The App uses the vendor-confirmed clear-then-replace protocol and prevents plan changes while a feed is active.
+- Blocked Polar plate position 0 after hardware testing showed it can cause continuous rotation. Cooling, sound, and other unobserved commands remain unavailable.
 
 ## 2026.08.8
 - Fixed the fountain Controls tab kicking you back to Overview after toggling Pump, Light, or the filter indicator light. The action itself always worked, the tab display just didn't know it had moved off Overview

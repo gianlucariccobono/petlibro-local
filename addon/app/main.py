@@ -749,23 +749,25 @@ async def handle_api_pet_image_upload(request):
 
 async def handle_api_feeding_plans_get(request):
     serial = request.match_info["serial"]
-    if storage.get_devices().get(serial, {}).get("device_type") == "polar":
-        return web.Response(status=409, text="Polar feeding plans are not yet hardware-verified")
     return web.json_response(storage.get_device_feeding_plans(serial))
 
 
 async def handle_api_feeding_plans_post(request):
     serial = request.match_info["serial"]
-    if storage.get_devices().get(serial, {}).get("device_type") == "polar":
-        return web.Response(status=409, text="Polar feeding plans are not yet hardware-verified")
     try:
         plans = await request.json()
         if not isinstance(plans, list):
             return web.Response(status=400, text="Expected a JSON array")
+        is_polar = storage.get_devices().get(serial, {}).get("device_type") == "polar"
+        if is_polar:
+            ok = await devices.send_polar_feeding_plans(serial, plans)
+        else:
+            ok = await devices.send_feeding_plans(serial, plans)
         storage.save_device_feeding_plans(serial, plans)
-        ok = await devices.send_feeding_plans(serial, plans)
         asyncio.ensure_future(devices.republish_ha_discovery(serial))
         return web.json_response({"status": "ok", "mqtt": ok})
+    except ValueError as exc:
+        return web.Response(status=400, text=str(exc))
     except Exception:
         _LOGGER.exception("Feeding plans update failed for %s...", serial[:6])
         return web.Response(status=400, text="Bad request")

@@ -181,7 +181,53 @@ def _entity_configs(serial: str, cfg: dict, state: dict, extra_icon_names: list[
                 "state_class":         "measurement",
             })))
 
-    # ── Feeder ────────────────────────────────────────────────────────────
+    # ── Polar wet-food feeder ─────────────────────────────────────────────
+    elif device_type == "polar":
+        for plate in (1, 2, 3):
+            key = f"serve_plate_{plate}"
+            entities.append(("button", key, _e(serial, key, b, {
+                "name": f"Serve Plate {plate}",
+                "command_topic": cmd_topic(serial, key),
+                "payload_press": "PRESS",
+                "icon": "mdi:food-drumstick",
+            })))
+        entities.append(("button", "stop_feed", _e(serial, "stop_feed", b, {
+            "name": "Stop Feed",
+            "command_topic": cmd_topic(serial, "stop_feed"),
+            "payload_press": "PRESS",
+            "icon": "mdi:stop-circle-outline",
+        })))
+        entities.append(("button", "open_lid", _e(serial, "open_lid", b, {
+            "name": "Open Lid",
+            "command_topic": cmd_topic(serial, "open_lid"),
+            "payload_press": "PRESS",
+            "icon": "mdi:door-open",
+        })))
+        entities.append(("button", "close_lid", _e(serial, "close_lid", b, {
+            "name": "Close Lid",
+            "command_topic": cmd_topic(serial, "close_lid"),
+            "payload_press": "PRESS",
+            "icon": "mdi:door-closed",
+        })))
+        entities.append(("button", "refresh_plans", _e(serial, "refresh_plans", b, {
+            "name": "Refresh Plans",
+            "command_topic": cmd_topic(serial, "refresh_plans"),
+            "payload_press": "PRESS",
+            "icon": "mdi:refresh",
+            "entity_category": "diagnostic",
+        })))
+        entities.append(("number", "plate_position", _e(serial, "plate_position", b, {
+            "name": "Plate Position",
+            "command_topic": cmd_topic(serial, "plate_position"),
+            "min": 1,
+            "max": 3,
+            "step": 1,
+            "mode": "box",
+            "optimistic": True,
+            "icon": "mdi:rotate-3d-variant",
+        })))
+
+    # ── Dry-food feeder ───────────────────────────────────────────────────
     elif device_type == "one_rfid":
         entities.append(("sensor", "battery", _e(serial, "battery", b, {
             "name":                "Battery",
@@ -337,6 +383,9 @@ def get_command_topics(serial: str, device_type: str) -> list[str]:
         topics.append(cmd_topic(serial, "volume"))
         topics.append(cmd_topic(serial, "display_text"))
         topics.append(cmd_topic(serial, "display_icon"))
+    elif device_type == "polar":
+        for key in ("serve_plate_1", "serve_plate_2", "serve_plate_3", "stop_feed", "open_lid", "close_lid", "refresh_plans", "plate_position"):
+            topics.append(cmd_topic(serial, key))
     return topics
 
 
@@ -489,6 +538,26 @@ def parse_command(topic: str, payload: str, device_type: str = "") -> dict | Non
         return {"lightSwitch": 1 if payload == "ON" else 0}
     if key == "feed_now":
         return {"_feed_now": True}
+    if device_type == "polar":
+        if key.startswith("serve_plate_"):
+            try:
+                plate = int(key.rsplit("_", 1)[1])
+            except ValueError:
+                return None
+            return {"_polar_serve_plate": {"plate": plate, "duration_seconds": 240}}
+        if key == "stop_feed":
+            return {"_polar_stop_feed": True}
+        if key == "open_lid":
+            return {"_polar_open_door": True}
+        if key == "close_lid":
+            return {"_polar_close_door": True}
+        if key == "refresh_plans":
+            return {"_polar_read_plans": True}
+        if key == "plate_position":
+            try:
+                return {"_polar_set_plate_position": int(float(payload))}
+            except (ValueError, TypeError):
+                return None
     if key == "open_door":
         return {"_open_door": True}
     if key == "volume":

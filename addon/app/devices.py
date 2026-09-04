@@ -10,6 +10,8 @@ import collections
 import json
 import logging
 import os
+import time
+import uuid
 
 import aiomqtt
 import device_types as _device_types
@@ -224,21 +226,44 @@ async def send_command(serial: str, payload: dict) -> bool:
 _POLAR_MANUAL_PLAN_ID = 666666666
 
 
-async def send_polar_wet_feed(serial: str, plate: int, duration_minutes: int) -> bool:
-    """Start a confirmed PLAF109 wet-feeding plan.
+def _polar_feed_active(serial: str) -> bool:
+    return bool(_state.get(serial, {}).get("_polar_feed_active"))
 
-    The device treats this as a full plan replacement, so callers must present
-    a destructive-action warning and this must remain an experimental control.
-    """
+
+def _validate_polar_plate(plate: object, field: str = "Plate number"):
+    if not isinstance(plate, int) or not 1 <= plate <= 3:
+        raise ValueError(f"{field} must be between 1 and 3")
+
+
+async def _send_polar_service(serial: str, command: str, **payload) -> bool:
+    """Publish a documented PLAF109 service request with a fresh correlation ID."""
     global _client_ref
     if _devices.get(serial, (None, ""))[1] != "polar":
-        raise ValueError("Polar wet-feed command sent to a non-Polar device")
-    if not isinstance(plate, int) or not 0 <= plate <= 6:
-        raise ValueError("Plate position must be between 0 and 6")
-    if not isinstance(duration_minutes, int) or not 1 <= duration_minutes <= 1440:
-        raise ValueError("Feeding duration must be between 1 and 1440 minutes")
+        raise ValueError("Polar command sent to a non-Polar device")
     if _client_ref is None:
         return False
+    envelope = {
+        "cmd": command,
+        "ts": int(time.time() * 1000),
+        "msgId": uuid.uuid4().hex,
+        **payload,
+    }
+    try:
+        await _client_ref.publish(_service_sub_topic("polar", serial), json.dumps(envelope))
+        _LOGGER.info("Polar %s sent to %s...", command, serial[:6])
+        return True
+    except Exception:
+        _LOGGER.exception("Polar %s failed for %s...", command, serial[:6])
+        return False
+
+
+async def send_polar_wet_feed(serial: str, plate: int, duration_seconds: int) -> bool:
+    """Start a documented PLAF109 manual wet-food feed."""
+    _validate_polar_plate(plate)
+    if not isinstance(duration_seconds, int) or not 1 <= duration_seconds <= 86400:
+        raise ValueError("Feeding duration must be between 1 and 86400 seconds")
+    if _polar_feed_active(serial):
+        raise ValueError("Wait for the current Polar feed to finish before starting another")
 
     import datetime as _dt
     import storage as _storage
@@ -252,52 +277,100 @@ async def send_polar_wet_feed(serial: str, plate: int, duration_minutes: int) ->
         except Exception:
             pass
     now = _dt.datetime.now(tz)
-    payload = {
-        "cmd": "WET_GRAIN_FEEDING_PLAN_SERVICE",
-        "msgId": f"{serial}_{int(now.timestamp() * 1000)}",
-        "ts": int(now.timestamp() * 1000),
-        "plans": [{
-            "planId": _POLAR_MANUAL_PLAN_ID,
-            "executionTime": now.strftime("%H:%M"),
-            "executionDay": now.strftime("%Y-%m-%d"),
-            "plate": plate,
-            "feedingDuration": duration_minutes,
-            "feedNowState": True,
-        }],
-    }
-    try:
-        await _client_ref.publish(_service_sub_topic("polar", serial), json.dumps(payload))
-        _LOGGER.warning("Experimental Polar wet-feed sent to %s... plate=%d duration=%dm", serial[:6], plate, duration_minutes)
-        return True
-    except Exception:
-        _LOGGER.exception("Experimental Polar wet-feed failed for %s...", serial[:6])
+    ok = await _send_polar_service(serial, "WET_GRAIN_FEEDING_PLAN_SERVICE", plans=[{
+        "planId": _POLAR_MANUAL_PLAN_ID,
+        "executionTime": now.strftime("%H:%M"),
+        "executionDay": now.strftime("%Y-%m-%d"),
+        "plate": plate,
+        "feedingDuration": duration_seconds,
+        "feedNowState": True,
+    }])
+    if ok:
+        _state.setdefault(serial, {})["_polar_feed_active"] = True
+    return ok
+
+
+async def send_polar_stop_feed(serial: str) -> bool:
+    """Stop the active PLAF109 feed; the device closes the door and emits GRAIN_END."""
+    return await _send_polar_service(
+        serial, "WET_FOOD_FEED_STOP_SERVICE", planId=_POLAR_MANUAL_PLAN_ID,
+    )
+
+
+async def send_polar_close_door(serial: str) -> bool:
+    """Close the confirmed PLAF109 direct door control."""
+    return await _send_polar_service(serial, "SWITCH_DOOR_SERVICE", barnDoorState=False)
+
+
+async def send_polar_open_door(serial: str) -> bool:
+    """Open the confirmed PLAF109 direct door control without moving the plate."""
+    return await _send_polar_service(serial, "SWITCH_DOOR_SERVICE", barnDoorState=True)
+
+
+def _validate_polar_plans(plans: list):
+    if not isinstance(plans, list):
+        raise ValueError("Polar plans must be a list")
+    plan_ids = set()
+    for plan in plans:
+        if not isinstance(plan, dict):
+            raise ValueError("Each Polar plan must be an object")
+        plan_id = plan.get("planId")
+        if not isinstance(plan_id, int) or plan_id == _POLAR_MANUAL_PLAN_ID or plan_id in plan_ids:
+            raise ValueError("Each Polar plan needs a unique non-manual plan ID")
+        plan_ids.add(plan_id)
+        _validate_polar_plate(plan.get("plate"), "Plan plate")
+        if not isinstance(plan.get("executionTime"), str) or len(plan["executionTime"]) != 5:
+            raise ValueError("Plan executionTime must be HH:MM")
+        try:
+            time.strptime(plan["executionTime"], "%H:%M")
+            time.strptime(plan.get("executionDay", ""), "%Y-%m-%d")
+        except ValueError as exc:
+            raise ValueError("Plan execution time or day is invalid") from exc
+        duration = plan.get("feedingDuration")
+        if not isinstance(duration, int) or not 1 <= duration <= 86400:
+            raise ValueError("Plan feedingDuration must be between 1 and 86400 seconds")
+
+
+async def send_polar_feeding_plans(serial: str, plans: list) -> bool:
+    """Replace the complete PLAF109 plan list using the vendor's clear-then-set flow."""
+    _validate_polar_plans(plans)
+    if _polar_feed_active(serial):
+        raise ValueError("Wait for the current Polar feed to finish before changing plans")
+    if not await _send_polar_service(serial, "WET_GRAIN_FEEDING_PLAN_SERVICE", plans=[]):
         return False
+    return not plans or await _send_polar_service(
+        serial, "WET_GRAIN_FEEDING_PLAN_SERVICE", plans=plans,
+    )
+
+
+async def request_polar_feeding_plan_readback(serial: str) -> bool:
+    """Request the stored representation of the known PLAF109 plan IDs."""
+    import storage as _storage
+
+    plans = []
+    for plan in _storage.get_device_feeding_plans(serial):
+        if not isinstance(plan, dict) or not isinstance(plan.get("planId"), int):
+            continue
+        plans.append({
+            "planId": plan["planId"],
+            "plate": plan.get("plate"),
+            "executionDay": plan.get("executionDay"),
+            "executionTime": plan.get("executionTime"),
+            "syncTime": 0,
+        })
+    return await _send_polar_service(
+        serial, "DEVICE_FEEDING_PLAN_SERVICE", code=0, plans=plans,
+    )
 
 
 async def send_polar_plate_position(serial: str, plate_position: int) -> bool:
     """Send the hardware-confirmed PLAF109 plate-position service."""
-    global _client_ref
-    if _devices.get(serial, (None, ""))[1] != "polar":
-        raise ValueError("Polar plate-position command sent to a non-Polar device")
-    if not isinstance(plate_position, int) or not 0 <= plate_position <= 6:
-        raise ValueError("Plate position must be between 0 and 6")
-    if _client_ref is None:
-        return False
-
-    import time
-    payload = {
-        "cmd": "SET_PLATE_POS_SERVICE",
-        "msgId": f"{serial}_{int(time.time() * 1000)}",
-        "ts": int(time.time() * 1000),
-        "platePosition": plate_position,
-    }
-    try:
-        await _client_ref.publish(_service_sub_topic("polar", serial), json.dumps(payload))
-        _LOGGER.warning("Experimental Polar plate-position sent to %s... position=%d", serial[:6], plate_position)
-        return True
-    except Exception:
-        _LOGGER.exception("Experimental Polar plate-position failed for %s...", serial[:6])
-        return False
+    _validate_polar_plate(plate_position, "Plate position")
+    if _polar_feed_active(serial):
+        raise ValueError("Wait for the current Polar feed to finish before moving the plate")
+    return await _send_polar_service(
+        serial, "SET_PLATE_POS_SERVICE", platePosition=plate_position,
+    )
 
 
 async def send_display(serial: str, display_text: str, display_icon: int) -> bool:
@@ -665,24 +738,24 @@ async def handle_ha_command(serial: str, cmd: dict) -> bool | None:
             if not isinstance(action, dict):
                 raise ValueError("Polar serve command must be an object")
             plate = action.get("plate")
-            duration = action.get("duration_minutes")
+            duration = action.get("duration_seconds")
             if not isinstance(plate, int) or not isinstance(duration, int):
-                raise ValueError("Polar serve command requires integer plate and duration_minutes")
+                raise ValueError("Polar serve command requires integer plate and duration_seconds")
             return await send_polar_wet_feed(serial, plate, duration)
-        if "_polar_open_lid" in cmd:
-            action = cmd["_polar_open_lid"]
-            if not isinstance(action, dict):
-                raise ValueError("Polar lid command must be an object")
-            duration = action.get("duration_minutes")
-            if not isinstance(duration, int):
-                raise ValueError("Polar lid command requires an integer duration_minutes")
-            return await send_polar_wet_feed(serial, 0, duration)
+        if cmd.get("_polar_stop_feed"):
+            return await send_polar_stop_feed(serial)
+        if cmd.get("_polar_open_door"):
+            return await send_polar_open_door(serial)
+        if cmd.get("_polar_close_door"):
+            return await send_polar_close_door(serial)
+        if cmd.get("_polar_read_plans"):
+            return await request_polar_feeding_plan_readback(serial)
         if "_polar_set_plate_position" in cmd:
             position = cmd["_polar_set_plate_position"]
             if not isinstance(position, int):
                 raise ValueError("Polar plate position must be an integer")
             return await send_polar_plate_position(serial, position)
-        raise ValueError("Only experimental Polar controls are supported")
+        raise ValueError("Unsupported Polar command")
     if cmd.get("_feed_now"):
         ok = await send_command(serial, {"cmd": "MANUAL_FEEDING_SERVICE", "grainNum": 1})
         _LOGGER.info("API Feed Now %s...: %s", serial[:6], "ok" if ok else "failed")
@@ -757,8 +830,25 @@ def _handle_message(serial: str, topic_str: str, raw: str):
         asyncio.ensure_future(_check_and_fire_alerts(serial))
         return
 
-    if cmd in ("WET_GRAIN_FEEDING_PLAN_SERVICE", "SET_PLATE_POS_SERVICE"):
-        _LOGGER.info("Experimental Polar service ack from %s... cmd=%s code=%s", serial[:6], cmd, data.get("code"))
+    if cmd in (
+        "WET_GRAIN_FEEDING_PLAN_SERVICE", "WET_FOOD_FEED_STOP_SERVICE",
+        "SET_PLATE_POS_SERVICE", "SWITCH_DOOR_SERVICE",
+    ):
+        _LOGGER.info("Polar service ack from %s... cmd=%s code=%s", serial[:6], cmd, data.get("code"))
+        _mark_online(serial)
+        asyncio.ensure_future(_check_and_fire_alerts(serial))
+        return
+
+    if cmd == "DEVICE_FEEDING_PLAN_SERVICE":
+        plans = data.get("plans")
+        _LOGGER.info("Polar plan readback from %s... code=%s plans=%s", serial[:6], data.get("code"), json.dumps(plans))
+        if isinstance(plans, list):
+            try:
+                _validate_polar_plans(plans)
+                import storage as _storage
+                _storage.save_device_feeding_plans(serial, plans)
+            except ValueError:
+                _LOGGER.warning("Polar plan readback from %s... was incomplete; retained local plan list", serial[:6])
         _mark_online(serial)
         asyncio.ensure_future(_check_and_fire_alerts(serial))
         return
@@ -778,8 +868,15 @@ def _handle_message(serial: str, topic_str: str, raw: str):
         asyncio.ensure_future(_check_and_fire_alerts(serial))
         return
 
-    if cmd == "GRAIN_OUTPUT_EVENT":
-        # Feeder reports grain dispensing progress. Ack it, and track intake on completion.
+    if cmd in ("GRAIN_OUTPUT_EVENT", "WET_GRAIN_OUTPUT_EVENT"):
+        # The Polar's wet-feed state machine emits WET_GRAIN_OUTPUT_EVENT.
+        # Like the dry feeder event, it must be acknowledged on the matching
+        # /sub topic or the device may not advance through its feed sequence.
+        step = data.get("execStep") or data.get("event")
+        if step in ("GRAIN_THAW", "GRAIN_START", "OPEN_DOOR"):
+            _state.setdefault(serial, {})["_polar_feed_active"] = True
+        elif step == "GRAIN_END":
+            _state.setdefault(serial, {})["_polar_feed_active"] = False
         asyncio.ensure_future(_ack_grain_output(serial, topic_str, data))
         _mark_online(serial)
         asyncio.ensure_future(_check_and_fire_alerts(serial))
@@ -1065,8 +1162,9 @@ async def _ack_grain_output(serial: str, event_topic: str, data: dict) -> None:
     if _client_ref is None:
         return
     response_topic = event_topic.replace("/post", "/sub")
+    event_cmd = data.get("cmd")
     ack = json.dumps({
-        "cmd":      "GRAIN_OUTPUT_EVENT",
+        "cmd":      event_cmd,
         "ts":       int(_time.time() * 1000),
         "msgId":    data.get("msgId", ""),
         "code":     0,
@@ -1077,7 +1175,7 @@ async def _ack_grain_output(serial: str, event_topic: str, data: dict) -> None:
     except Exception:
         pass
     # Track food dispensed on completion
-    if data.get("finished") and data.get("actualGrainNum", 0) > 0:
+    if event_cmd == "GRAIN_OUTPUT_EVENT" and data.get("finished") and data.get("actualGrainNum", 0) > 0:
         try:
             import storage as _storage
             portions = data["actualGrainNum"]

@@ -35,7 +35,7 @@ function openDeviceModal(device) {
     powerEl.style.display = "none";
   }
 
-  const isFeeder = device.device_type === "one_rfid";
+  const isFeeder = device.device_type === "one_rfid" || device.device_type === "polar";
   const isFountain = device.device_type?.startsWith("dockstream");
   document.querySelectorAll(".dtab").forEach(b => {
     b.classList.toggle("active", b.dataset.dtab === "overview");
@@ -79,8 +79,13 @@ function renderDeviceTab(tabName) {
     api("GET", `/api/devices/${_currentDevice.serial}/feeding-plans`)
       .then(plans => {
         _schedPlans = plans;
-        content.innerHTML = buildScheduleTab(plans);
-        wireScheduleTabHandlers();
+        if (_currentDevice.device_type === "polar") {
+          content.innerHTML = buildPolarScheduleTab(plans);
+          wirePolarScheduleTabHandlers();
+        } else {
+          content.innerHTML = buildScheduleTab(plans);
+          wireScheduleTabHandlers();
+        }
       })
       .catch(() => { content.innerHTML = `<p style="color:var(--pl-danger);padding:16px 0">${t("device_modal.load_failed_schedule")}</p>`; });
     return;
@@ -234,21 +239,21 @@ function buildOverviewTab(device) {
       <div class="tab-section-heading">${t("overview.polar_controls")}</div>
       <div class="form-row">
         <label class="form-label">${t("overview.polar_plate")}</label>
-        <input class="form-input" id="polar-serve-plate" type="number" min="1" max="6" value="1">
+        <input class="form-input" id="polar-serve-plate" type="number" min="1" max="3" value="1">
       </div>
       <div class="form-row">
         <label class="form-label">${t("overview.polar_duration")}</label>
-        <input class="form-input" id="polar-serve-duration" type="number" min="1" max="1440" value="240">
+        <input class="form-input" id="polar-serve-duration" type="number" min="1" max="86400" value="240">
       </div>
       <button class="btn-primary" id="btn-polar-serve" style="width:100%">${t("overview.polar_serve")}</button>
-      <div class="form-row" style="margin-top:16px">
-        <label class="form-label">${t("overview.polar_lid_duration")}</label>
-        <input class="form-input" id="polar-lid-duration" type="number" min="1" max="1440" value="240">
+      <div style="display:flex;gap:8px;margin-top:8px">
+        <button class="btn-secondary" id="btn-polar-open" style="flex:1">${t("overview.open_lid")}</button>
+        <button class="btn-secondary" id="btn-polar-stop" style="flex:1">${t("overview.polar_stop")}</button>
+        <button class="btn-secondary" id="btn-polar-close" style="flex:1">${t("overview.polar_close")}</button>
       </div>
-      <button class="btn-secondary" id="btn-polar-open-lid" style="width:100%">${t("overview.open_lid")}</button>
       <div class="form-row" style="margin-top:16px">
         <label class="form-label">${t("overview.polar_position")}</label>
-        <input class="form-input" id="polar-plate-position" type="number" min="0" max="6" value="0">
+        <input class="form-input" id="polar-plate-position" type="number" min="1" max="3" value="1">
       </div>
       <button class="btn-secondary" id="btn-polar-set-position" style="width:100%">${t("overview.polar_set_position")}</button>
     </div>`;
@@ -708,6 +713,107 @@ function buildScheduleTab(plans) {
     <p style="font-size:11px;color:var(--pl-subtext);margin-top:4px">${t("schedule.sync_note")}</p>`;
 }
 
+function buildPolarScheduleTab(plans) {
+  const order = plans.map((_, i) => i).sort((a, b) =>
+    `${plans[a].executionDay || ""} ${plans[a].executionTime || ""}`.localeCompare(`${plans[b].executionDay || ""} ${plans[b].executionTime || ""}`)
+  );
+  const rows = order.map(i => {
+    const plan = plans[i];
+    return `<div class="sched-row" data-idx="${i}">
+      <div class="sched-time">${escHtml(plan.executionDay || "")}</div>
+      <div class="sched-meta">${escHtml(plan.executionTime || "")} · ${t("schedule.polar_plate", {plate: plan.plate})} · ${t("schedule.polar_duration", {seconds: plan.feedingDuration})}</div>
+      <div class="sched-actions"><button class="sched-del-btn" data-idx="${i}" title="Delete" style="background:none;border:none;cursor:pointer;padding:4px;color:var(--pl-danger,#e05252);font-size:16px;line-height:1;opacity:0.8">&#x2715;</button></div>
+    </div>`;
+  }).join("");
+  const now = new Date();
+  const today = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, "0")}-${String(now.getDate()).padStart(2, "0")}`;
+  return `<div class="tab-section-heading">${t("schedule.polar_heading")}</div>
+    <p class="form-hint">${t("schedule.polar_note")}</p>
+    <div class="sched-form open" id="polar-sched-form">
+      <div class="form-row"><label>${t("schedule.polar_date")}</label><input type="date" class="form-input" id="ps-date" value="${today}"></div>
+      <div class="form-row"><label>${t("schedule.time")}</label><input type="time" class="form-input" id="ps-time" value="08:00"></div>
+      <div class="form-row"><label>${t("schedule.polar_plate_label")}</label><input type="number" class="form-input" id="ps-plate" min="1" max="3" value="1"></div>
+      <div class="form-row"><label>${t("schedule.polar_duration_label")}</label><input type="number" class="form-input" id="ps-duration" min="1" max="86400" value="240"></div>
+      <button class="btn-primary" id="ps-add" style="width:100%">${t("schedule.add")}</button>
+    </div>
+    <div class="sched-list" id="polar-sched-list">${rows || `<p style="color:var(--pl-subtext);text-align:center;padding:12px 0">${t("schedule.no_plans")}</p>`}</div>
+    <div style="display:flex;gap:8px;margin-top:10px">
+      <button class="btn-secondary" id="ps-refresh" style="flex:1">${t("schedule.polar_refresh")}</button>
+      <button class="btn-secondary" id="ps-clear" style="flex:1">${t("schedule.polar_clear")}</button>
+    </div>`;
+}
+
+async function _savePolarSchedule() {
+  return api("POST", `/api/devices/${_currentDevice.serial}/feeding-plans`, _schedPlans);
+}
+
+function wirePolarScheduleTabHandlers() {
+  const list = document.getElementById("polar-sched-list");
+  const rerender = () => {
+    document.getElementById("dtab-content").innerHTML = buildPolarScheduleTab(_schedPlans);
+    wirePolarScheduleTabHandlers();
+  };
+  document.getElementById("ps-add").onclick = async () => {
+    const executionDay = document.getElementById("ps-date").value;
+    const executionTime = document.getElementById("ps-time").value;
+    const plate = parseInt(document.getElementById("ps-plate").value);
+    const feedingDuration = parseInt(document.getElementById("ps-duration").value);
+    if (!executionDay || !executionTime || !Number.isInteger(plate) || !Number.isInteger(feedingDuration)) {
+      alert(t("schedule.polar_invalid"));
+      return;
+    }
+    const planIds = new Set(_schedPlans.map(plan => plan.planId));
+    let planId;
+    do {
+      planId = 100000000 + Math.floor(Math.random() * 900000000);
+    } while (planIds.has(planId));
+    _schedPlans.push({
+      planId,
+      executionDay, executionTime, plate, feedingDuration,
+    });
+    try {
+      await _savePolarSchedule();
+      rerender();
+    } catch (e) {
+      _schedPlans.pop();
+      alert(t("overview.cmd_failed", {error: e.message}));
+    }
+  };
+  list?.querySelectorAll(".sched-del-btn").forEach(btn => {
+    btn.onclick = async () => {
+      const index = +btn.dataset.idx;
+      const removed = _schedPlans.splice(index, 1)[0];
+      try {
+        await _savePolarSchedule();
+        rerender();
+      } catch (e) {
+        _schedPlans.splice(index, 0, removed);
+        alert(t("overview.cmd_failed", {error: e.message}));
+      }
+    };
+  });
+  document.getElementById("ps-refresh").onclick = async () => {
+    try {
+      await api("POST", `/api/devices/${_currentDevice.serial}/command`, { _polar_read_plans: true });
+      setTimeout(() => renderDeviceTab("schedule"), 750);
+    } catch (e) {
+      alert(t("overview.cmd_failed", {error: e.message}));
+    }
+  };
+  document.getElementById("ps-clear").onclick = async () => {
+    if (!confirm(t("schedule.polar_confirm_clear"))) return;
+    const previous = _schedPlans;
+    _schedPlans = [];
+    try {
+      await _savePolarSchedule();
+      rerender();
+    } catch (e) {
+      _schedPlans = previous;
+      alert(t("overview.cmd_failed", {error: e.message}));
+    }
+  };
+}
+
 // In-memory plans for schedule tab editing
 let _schedPlans = [];
 
@@ -1008,16 +1114,16 @@ function wireDeviceTabHandlers(tabName) {
       const serve = document.getElementById("btn-polar-serve");
       if (serve) serve.onclick = () => {
         const plate = parseInt(document.getElementById("polar-serve-plate").value);
-        const duration_minutes = parseInt(document.getElementById("polar-serve-duration").value);
-        runPolarAction(serve, { _polar_serve_plate: { plate, duration_minutes } },
-          t("overview.polar_confirm_serve", {plate, duration: duration_minutes}));
+        const duration_seconds = parseInt(document.getElementById("polar-serve-duration").value);
+        runPolarAction(serve, { _polar_serve_plate: { plate, duration_seconds } },
+          t("overview.polar_confirm_serve", {plate, duration: duration_seconds}));
       };
-      const openLid = document.getElementById("btn-polar-open-lid");
-      if (openLid) openLid.onclick = () => {
-        const duration_minutes = parseInt(document.getElementById("polar-lid-duration").value);
-        runPolarAction(openLid, { _polar_open_lid: { duration_minutes } },
-          t("overview.polar_confirm_lid", {duration: duration_minutes}));
-      };
+      const stop = document.getElementById("btn-polar-stop");
+      if (stop) stop.onclick = () => runPolarAction(stop, { _polar_stop_feed: true }, t("overview.polar_confirm_stop"));
+      const open = document.getElementById("btn-polar-open");
+      if (open) open.onclick = () => runPolarAction(open, { _polar_open_door: true }, t("overview.polar_confirm_open"));
+      const close = document.getElementById("btn-polar-close");
+      if (close) close.onclick = () => runPolarAction(close, { _polar_close_door: true }, t("overview.polar_confirm_close"));
       const setPosition = document.getElementById("btn-polar-set-position");
       if (setPosition) setPosition.onclick = () => {
         const position = parseInt(document.getElementById("polar-plate-position").value);
