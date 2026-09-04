@@ -228,13 +228,7 @@ function buildOverviewTab(device) {
   }
 
   if (device.device_type === "polar") {
-    return `<div class="detail-stats">
-      <div class="detail-stat">
-        <div class="detail-stat-label">${t("overview.status")}</div>
-        <div class="detail-stat-value accent">${t("overview.experimental")}</div>
-      </div>
-    </div>
-    <p class="form-hint" style="margin-top:16px">${t("overview.polar_warning")}</p>
+    return `<p class="form-hint">${t("overview.polar_warning")}</p>
     <div style="margin-top:16px">
       <div class="tab-section-heading">${t("overview.polar_controls")}</div>
       <div class="form-row">

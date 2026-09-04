@@ -806,6 +806,13 @@ def _handle_message(serial: str, topic_str: str, raw: str):
 
     cmd = data.get("cmd")
 
+    # PLAF109 firmware reports feed lifecycle states either as a direct cmd or
+    # as execStep within WET_GRAIN_OUTPUT_EVENT, depending on its firmware.
+    if cmd in ("GRAIN_THAW", "GRAIN_START", "OPEN_DOOR"):
+        _state.setdefault(serial, {})["_polar_feed_active"] = True
+    elif cmd == "GRAIN_END":
+        _state.setdefault(serial, {})["_polar_feed_active"] = False
+
     if cmd == "NTP":
         asyncio.ensure_future(_respond_ntp(topic_str))
         return

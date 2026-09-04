@@ -147,7 +147,6 @@
   "overview.water_level": "Water Level",
   "overview.status": "Status",
   "overview.monitoring": "Monitoring",
-  "overview.experimental": "Experimental",
   "overview.polar_warning": "Only start a feed or move a plate after the previous feed has ended. Plate 0 is blocked because it can continuously rotate the feeder.",
   "overview.polar_controls": "Polar Controls",
   "overview.polar_plate": "Plate Number",
