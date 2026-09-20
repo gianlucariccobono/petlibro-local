@@ -10,6 +10,7 @@ function switchTab(name) {
   document.querySelectorAll(".tab-panel").forEach(p => p.classList.toggle("active", p.id === `panel-${name}`));
   const sw = document.getElementById("header-sort-wrap");
   if (sw) sw.style.display = name === "devices" ? "flex" : "none";
+  if (name === "schedules") renderSchedules();
 }
 
 // ── Refresh ───────────────────────────────────────────────────────────────

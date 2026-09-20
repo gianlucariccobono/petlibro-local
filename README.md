@@ -43,7 +43,7 @@ If you are not comfortable with these terms, do not use this software.
 | Dockstream 2 Cordless Fountain (white) | WF04...BA... (inferred) | PLWF116 | Beta |
 | Dockstream RFID Smart Fountain | WF02 | PLWF305 | Beta |
 | One RFID Smart Feeder | AF06 | PLAF301 | Supported |
-| Polar Wet Food Feeder | Unknown | PLAF109 | Local controls and one-time dated plans |
+| Polar Wet Food Feeder | Unknown | PLAF109 | Local controls; global schedules planned |
 
 **Color variant encoding:** On the Dockstream 2, I think the serial number encodes the color variant. The characters at positions 10–11 appear to indicate color: `BD` = black, `BA` = white. If other owners of the Dockstream 2 fountains could also let me know by opening an issue.
 
@@ -53,7 +53,7 @@ If you are not comfortable with these terms, do not use this software.
 
 **One RFID Smart Feeder:** Significantly different from the fountain: RFID door, desiccant tray, feeding plan, display matrix, sound, and lid controls. Serial prefix confirmed as `AF06`, MQTT model confirmed as `PLAF301`. Color variant does not appear to be encoded at positions 10–11 the way fountain serials are. Note that Petlibro's product listing shows this device as model `PLAF103`; that's the retail box/product number and is unrelated to `PLAF301`, which is the MQTT topic model this app matches on. Serials on newer hardware revisions run a few characters longer than early units but use the same `AF06` prefix and work the same way.
 
-**Polar Wet Food Feeder:** MQTT model `PLAF109` is confirmed. This App provides connection monitoring, signal/firmware diagnostics, an app-local bowl-cleaning reminder, manual serving for plates 1-3, direct lid open/close, stop-feed, and plate positioning. It also manages up to three independent, one-time dated feeding plans using the vendor's clear-then-replace protocol and can request a readback of its known plan IDs. Plan dates and times are entered and displayed in the configured feeder timezone, then converted to the UTC fields required by the device. Manual feeds and plate moves are blocked until the current feed emits its completion event; plan changes are allowed at any time. Plate position `0` remains blocked because hardware testing caused continuous rotation. Cooling, sound, and other unobserved services remain unavailable. Its serial prefix and color variants are not yet confirmed.
+**Polar Wet Food Feeder:** MQTT model `PLAF109` is confirmed. This App provides connection monitoring, signal/firmware diagnostics, an app-local bowl-cleaning reminder, manual serving for plates 1-3, direct lid open/close, stop-feed, and plate positioning. Global Polar schedule support is planned; the design is described below rather than as per-device plan management. Manual feeds and plate moves are blocked until the current feed emits its completion event. Plate position `0` remains unavailable. Cooling, sound, and other unobserved services remain unavailable. Its serial prefix and color variants are not yet confirmed.
 
 Additional devices can be added by contributing a device type entry, the MQTT model string (the topic prefix after `dl/`), and the serial number prefix used for auto-detection during capture. The MQTT topic structure is consistent across the Petlibro product line.
 
@@ -135,6 +135,11 @@ The first time you set up a device, Petlibro Local briefly stops Mosquitto and r
 - **Custom Icon Editor**: draw pixel art on a 5 × 12 grid, preview it at full 26-pixel display width, save up to 12 named icons, and send them to the feeder with one tap. Includes a "Petlibro Salute" built-in preset
 - **Custom feed sounds**: upload an audio file (any common format, MP3/WAV/M4A/etc., converted automatically) or record one from your microphone, in the Settings → Audio tab. All feeders share one sound library there. From a feeder's Maintenance tab, pick a sound and push it to play on that feeder's scheduled feeds instead of the default chime. Requires a one-time "Local Audio Base URL" setting (a plain LAN address for this app, since the feeder fetches the file directly and can't use your logged-in browser session). Only plays on actual scheduled feeds; PetLibro's own protocol doesn't support sound on a manual Feed Now
 - All controls send directly to the device over local MQTT using the standard Petlibro service protocol
+
+### Planned: Global Polar Schedules
+Polar schedules are planned as a central **Schedules** menu, not as separate plan editors on each device. One shared action can be mapped to multiple Polar feeders and can run daily or at a specific local date and time.
+
+The scheduler will use the configured local timezone and date-aware rollover, checking shortly after midnight so a daily action advances to the correct local date. Each Polar can hold only three plans. Because the MQTT plan objects are immutable, the scheduler will materialize a new plan object for each day rather than edit an existing object. If a Polar is offline, newly materialized plans cannot be synchronized until it reconnects, so delivery may be delayed or require a reconnect sync.
 
 > **Note:** Existing feeding schedules created in the Petlibro app will likely continue to run on the feeder, but it is recommended to recreate them in Petlibro Local to ensure they are managed and visible here. Schedules created in the cloud app may not survive a feeder reboot once the device is running locally.
 

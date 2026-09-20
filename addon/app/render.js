@@ -43,7 +43,6 @@ function renderDevices() {
     sg: d.surplusGrain, eq: d.electricQuantity, pt: d.powerType, bd: d.barnDoorState,
     img: d.image_url, name: d.name, room: d.room,
     lct: d.last_cleaned_ts, lci: d.cleaning_interval_days,
-    plans: (d.feeding_plans||[]).map(p=>p.executionTime+"_"+(p._enabled!==false?1:0)).join(),
     dt: d.display_text, din: d.display_icon_name, di: d.display_icon,
     pets: (d.pets || []).map(p => `${p.id}:${p.image_url}:${p.name}`).join(),
     units: _settings.units, sort: _deviceSort,

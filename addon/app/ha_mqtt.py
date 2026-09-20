@@ -408,6 +408,20 @@ def _next_meal_ts(plans: list) -> str | None:
         if plan.get("_enabled") is False:
             continue
         exec_time = plan.get("executionTime", "")
+        # Polar materializations are dated UTC plans, unlike One RFID's
+        # recurring repeatDay plans.  Keep this branch separate so the latter
+        # retains its existing weekday semantics.
+        execution_day = plan.get("executionDay")
+        if execution_day and not plan.get("repeatDay"):
+            try:
+                candidate = datetime.datetime.strptime(
+                    f"{execution_day} {exec_time}", "%Y-%m-%d %H:%M"
+                ).replace(tzinfo=datetime.timezone.utc)
+            except (TypeError, ValueError):
+                continue
+            if candidate > now and (best is None or candidate < best):
+                best = candidate
+            continue
         repeat_day = plan.get("repeatDay", [])
         if not exec_time or not repeat_day:
             continue

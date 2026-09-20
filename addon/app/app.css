@@ -889,6 +889,15 @@
   .portion-chips { display: flex; gap: 5px; }
   .portion-chip { width: 34px; height: 34px; border-radius: 50%; border: 1px solid var(--pl-border); font-size: 14px; font-weight: 600; cursor: pointer; background: var(--pl-surface); color: var(--pl-text); display: flex; align-items: center; justify-content: center; }
   .portion-chip.on { background: var(--pl-accent); color: #fff; border-color: var(--pl-accent); }
+  .schedules-head { display:flex; justify-content:space-between; align-items:flex-start; gap:16px; margin-bottom:18px; }
+  .schedules-head .tab-section-heading { margin-bottom:4px; }
+  .schedule-form-grid { display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); gap:0 14px; }
+  .schedule-devices { min-height:72px; }
+  .schedule-form-actions { display:flex; gap:8px; margin-top:12px; }
+  .schedule-form-actions button { flex:1; }
+  .schedule-state { text-align:center; color:var(--pl-subtext); padding:30px 12px; }
+  .schedule-state.error { color:var(--pl-danger); }
+  @media (max-width:599px) { .schedules-head { align-items:stretch; flex-direction:column; } .schedules-head button { width:100%; } .schedule-form-grid { grid-template-columns:1fr; } }
 
   /* ── LED dot-matrix display widget ── */
   .led-display {

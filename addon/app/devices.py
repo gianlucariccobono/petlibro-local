@@ -7,11 +7,14 @@ Device-type-specific logic (alerts, intake tracking) lives in device_types/.
 
 import asyncio
 import collections
+import datetime
+import hashlib
 import json
 import logging
 import os
 import time
 import uuid
+from zoneinfo import ZoneInfo
 
 import aiomqtt
 import device_types as _device_types
@@ -122,7 +125,7 @@ async def _poll_attr_state(serial: str, device_type: str):
         _LOGGER.exception("ATTR_GET_SERVICE poll failed for %s...", serial[:6])
 
 
-def _mark_online(serial: str):
+def _mark_online(serial: str, resync_polar: bool = True):
     """Mark device online and clear any pending offline timer."""
     import time as _t
     _last_seen[serial] = _t.time()
@@ -130,15 +133,20 @@ def _mark_online(serial: str):
     _online[serial] = True
     if not was_online:
         _offline_since.pop(serial, None)
+        device_type = _devices.get(serial, (None, None))[1]
         if _client_ref is not None:
             asyncio.ensure_future(ha_mqtt.publish_availability(_client_ref, serial, True))
-            device_type = _devices.get(serial, (None, None))[1]
             if device_type:
                 # Poll full attribute state right away instead of waiting up
                 # to ATTR_POLL_INTERVAL_SECS for the next watchdog sweep --
                 # shaves the "just added/reconnected, no readings yet" gap
                 # a new device would otherwise sit in.
                 asyncio.ensure_future(_poll_attr_state(serial, device_type))
+        if resync_polar and device_type == "polar":
+            # The first observed online edge must recover desired state even
+            # when startup happened before the offline watchdog could record it.
+            # Ordinary heartbeats do not enter this block.
+            asyncio.ensure_future(reconcile_schedules(force=True, serials={serial}))
 
 
 def _mark_offline(serial: str):
@@ -159,6 +167,7 @@ def unregister_device(serial: str):
     _offline_since.pop(serial, None)
     _last_seen.pop(serial, None)
     _alert_sent.pop(serial, None)
+    _last_polar_plans.pop(serial, None)
     if _reconnect_event:
         _reconnect_event.set()
 
@@ -332,6 +341,250 @@ async def send_polar_feeding_plans(serial: str, plans: list) -> bool:
     return not plans or await _send_polar_service(
         serial, "WET_GRAIN_FEEDING_PLAN_SERVICE", plans=plans,
     )
+
+
+# ── Global Polar schedule materialization ───────────────────────────────────
+
+def _polar_occurrence(schedule: dict, now: datetime.datetime | None = None):
+    """Return (local occurrence date, immutable UTC plan) for this schedule."""
+    import storage as _storage
+    now = now or datetime.datetime.now(datetime.timezone.utc)
+    tz = ZoneInfo(schedule["timezone"])
+    local_now = now.astimezone(tz)
+    local_time = datetime.time.fromisoformat(schedule["local_time"])
+
+    if schedule["kind"] == "date":
+        target_date = datetime.date.fromisoformat(schedule["local_date"])
+        if target_date < local_now.date():
+            return None
+    else:
+        target_date = local_now.date()
+
+    def localize(day):
+        return _storage.localize_schedule_datetime(day, schedule["local_time"], tz)
+
+    candidate = localize(target_date)
+    if schedule["kind"] == "daily" and (candidate is None or candidate <= local_now):
+        target_date += datetime.timedelta(days=1)
+        candidate = localize(target_date)
+    if candidate is None or candidate <= local_now:
+        return None
+
+    utc = candidate.astimezone(datetime.timezone.utc)
+    # Stable, non-manual integer ID.  The local occurrence date is part of the
+    # identity, so daily rollover creates a new immutable payload.
+    digest = hashlib.sha256(
+        "|".join(str(value) for value in (
+            schedule["id"], target_date.isoformat(), schedule["local_time"],
+            schedule["timezone"], utc.strftime("%Y-%m-%d"),
+            utc.strftime("%H:%M"), schedule["plate"],
+            schedule["feeding_duration"],
+        )).encode()
+    ).digest()
+    plan_id = int.from_bytes(digest[:8], "big") % 2_000_000_000 + 1
+    if plan_id == _POLAR_MANUAL_PLAN_ID:
+        plan_id += 1
+    payload = {
+        "planId": plan_id,
+        "executionDay": utc.strftime("%Y-%m-%d"),
+        "executionTime": utc.strftime("%H:%M"),
+        "plate": schedule["plate"],
+        "feedingDuration": schedule["feeding_duration"],
+    }
+    return target_date.isoformat(), payload
+
+
+def _build_schedule_materializations(
+    schedules: list,
+    now=None,
+    existing_materializations: list | None = None,
+    ignore_schedule_ids: set[str] | None = None,
+    device_configs: dict | None = None,
+) -> list:
+    records = []
+    import storage as _storage
+    devices = _storage.get_devices() if device_configs is None else device_configs
+    now = now or datetime.datetime.now(datetime.timezone.utc)
+    if existing_materializations is None:
+        existing_materializations = _storage.get_schedule_materializations()
+    ignored = ignore_schedule_ids or set()
+    existing_by_key = {}
+    for record in existing_materializations:
+        key = (record.get("scheduleId"), record.get("serial"), record.get("localDate"))
+        if key[0] not in ignored and key not in existing_by_key:
+            payload = record.get("payload")
+            if isinstance(payload, dict):
+                try:
+                    _validate_polar_plans([payload])
+                except ValueError:
+                    continue
+                existing_by_key[key] = dict(payload)
+
+    for schedule in sorted(schedules, key=lambda item: item["id"]):
+        if not schedule.get("enabled"):
+            continue
+        for serial in schedule.get("device_serials", []):
+            # A device type change unmaps the schedule without deleting its
+            # definition.  Device deletion prunes the reference in storage.
+            if devices.get(serial, {}).get("device_type") != "polar":
+                continue
+            try:
+                local_now = now.astimezone(ZoneInfo(schedule["timezone"]))
+                if (
+                    schedule["kind"] == "date"
+                    and local_now.date() > datetime.date.fromisoformat(schedule["local_date"])
+                ):
+                    continue
+                eligible_local_date = (
+                    local_now.date().isoformat()
+                    if schedule["kind"] == "daily"
+                    else schedule["local_date"]
+                )
+                existing_payload = existing_by_key.get(
+                    (schedule["id"], serial, eligible_local_date)
+                )
+                if existing_payload is not None:
+                    records.append({
+                        "scheduleId": schedule["id"],
+                        "serial": serial,
+                        "localDate": eligible_local_date,
+                        "payload": dict(existing_payload),
+                    })
+                    continue
+                occurrence = _polar_occurrence(schedule, now=now)
+            except (KeyError, ValueError, TypeError):
+                _LOGGER.warning("Skipping invalid stored Polar schedule %s", schedule.get("id"))
+                continue
+            if occurrence is None:
+                continue
+            local_date, payload = occurrence
+            records.append({
+                "scheduleId": schedule["id"],
+                "serial": serial,
+                "localDate": local_date,
+                "payload": payload,
+            })
+    return records
+
+
+def _managed_plans(records: list, serial: str) -> list:
+    return [
+        dict(record["payload"])
+        for record in records
+        if record.get("serial") == serial
+    ]
+
+
+def _composed_polar_plans(serial: str, records: list | None = None) -> list:
+    import storage as _storage
+    legacy = _storage.get_legacy_device_feeding_plans(serial)
+    managed = _managed_plans(records if records is not None else _storage.get_schedule_materializations(), serial)
+    # Copying the list/dicts for the compatibility view prevents later MQTT
+    # serialization or UI code from mutating either source snapshot.
+    return [dict(plan) if isinstance(plan, dict) else plan for plan in legacy + managed]
+
+
+def validate_schedule_capacity(schedule: dict, replacing_id: str | None = None):
+    """Reject a definition before durable write if any Polar exceeds three plans."""
+    import storage as _storage
+    schedules = [s for s in _storage.get_schedules() if s["id"] != replacing_id]
+    schedules.append(schedule)
+    records = _build_schedule_materializations(
+        schedules,
+        ignore_schedule_ids={schedule["id"]},
+    )
+    device_cfgs = _storage.get_devices()
+    for serial, cfg in device_cfgs.items():
+        if cfg.get("device_type") != "polar":
+            continue
+        count = len(_storage.get_legacy_device_feeding_plans(serial))
+        count += len(_managed_plans(records, serial))
+        if count > 3:
+            raise ValueError(f"Polar device {serial} would have more than three feeding plans")
+        try:
+            _validate_polar_plans(_composed_polar_plans(serial, records))
+        except ValueError as exc:
+            raise ValueError(f"Polar device {serial} has incompatible feeding plans: {exc}") from exc
+
+
+def validate_device_schedule_capacity(serial: str, proposed_cfg: dict):
+    """Preflight schedules against a device config before making it Polar."""
+    import storage as _storage
+    device_configs = _storage.get_devices()
+    device_configs[serial] = dict(proposed_cfg)
+    records = _build_schedule_materializations(
+        _storage.get_schedules(), device_configs=device_configs,
+    )
+    for target_serial, cfg in device_configs.items():
+        if cfg.get("device_type") != "polar":
+            continue
+        total = len(_storage.get_legacy_device_feeding_plans(target_serial))
+        total += len(_managed_plans(records, target_serial))
+        if total > 3:
+            raise ValueError(f"Polar device {target_serial} would have more than three feeding plans")
+        try:
+            _validate_polar_plans(_composed_polar_plans(target_serial, records))
+        except ValueError as exc:
+            raise ValueError(f"Polar device {target_serial} has incompatible feeding plans: {exc}") from exc
+
+
+async def reconcile_schedules(force: bool = False, serials: set[str] | None = None) -> bool:
+    """Recover, rotate, and deliver the desired global Polar plan state."""
+    global _schedule_reconcile_lock
+    if _schedule_reconcile_lock is None:
+        _schedule_reconcile_lock = asyncio.Lock()
+    async with _schedule_reconcile_lock:
+        import storage as _storage
+        schedules = _storage.get_schedules()
+        records = _build_schedule_materializations(schedules)
+        # This is also a recovery check for old/manual storage edits.  Never
+        # send a state that exceeds Polar's hard capacity.
+        for serial, cfg in _storage.get_devices().items():
+            if cfg.get("device_type") != "polar":
+                continue
+            total = len(_storage.get_legacy_device_feeding_plans(serial)) + len(_managed_plans(records, serial))
+            if total > 3:
+                _LOGGER.error("Not reconciling Polar %s...: %d plans exceed capacity", serial[:6], total)
+                return False
+
+        _storage.replace_schedule_materializations(records)
+        polar_serials = {
+            serial for serial, cfg in _storage.get_devices().items()
+            if cfg.get("device_type") == "polar"
+        }
+        for serial, cfg in _storage.get_devices().items():
+            if cfg.get("device_type") != "polar":
+                _storage.save_composed_device_feeding_plans(
+                    serial, _storage.get_legacy_device_feeding_plans(serial)
+                )
+        if serials is not None:
+            polar_serials = {
+                s for s in serials
+                if _storage.get_devices().get(s, {}).get("device_type") == "polar"
+            }
+        for serial in polar_serials:
+            plans = _composed_polar_plans(serial, records)
+            _storage.save_composed_device_feeding_plans(serial, plans)
+            if _client_ref is None or (not force and _last_polar_plans.get(serial) == plans):
+                continue
+            try:
+                sent = await send_polar_feeding_plans(serial, plans)
+            except ValueError as exc:
+                _LOGGER.error("Polar schedule state for %s... was not sent: %s", serial[:6], exc)
+                continue
+            if sent:
+                _last_polar_plans[serial] = [dict(p) if isinstance(p, dict) else p for p in plans]
+                await _publish_ha_state(serial)
+        return True
+
+
+async def _schedule_loop():
+    while True:
+        await asyncio.sleep(60)
+        try:
+            await reconcile_schedules()
+        except Exception:
+            _LOGGER.exception("Polar schedule reconciliation failed")
 
 
 async def request_polar_feeding_plan_readback(serial: str) -> bool:
@@ -850,10 +1103,10 @@ def _handle_message(serial: str, topic_str: str, raw: str):
         if isinstance(plans, list):
             try:
                 _validate_polar_plans(plans)
-                import storage as _storage
-                _storage.save_device_feeding_plans(serial, plans)
             except ValueError:
                 _LOGGER.warning("Polar plan readback from %s... was incomplete; retained local plan list", serial[:6])
+            else:
+                _LOGGER.info("Polar readback from %s... was accepted; local desired plans remain authoritative", serial[:6])
         _mark_online(serial)
         asyncio.ensure_future(_check_and_fire_alerts(serial))
         return
@@ -1058,7 +1311,9 @@ def _handle_message(serial: str, topic_str: str, raw: str):
     if cmd == "DEVICE_START_EVENT":
         # Feeder just booted — ack it.
         asyncio.ensure_future(_ack_device_start(serial, topic_str, data))
-        _mark_online(serial)
+        # _ack_device_start performs the Polar resync after its required ack;
+        # suppress the generic first-online resync here to avoid two pushes.
+        _mark_online(serial, resync_polar=False)
         asyncio.ensure_future(_check_and_fire_alerts(serial))
         return
 
@@ -1325,6 +1580,8 @@ async def _ack_device_start(serial: str, event_topic: str, data: dict) -> None:
         _LOGGER.debug("DEVICE_START_EVENT acked for %s...", serial[:6])
     except Exception:
         pass
+    if _devices.get(serial, (None, ""))[1] == "polar":
+        await reconcile_schedules(force=True, serials={serial})
 
 
 async def _respond_ntp(request_topic: str) -> None:
@@ -1505,6 +1762,10 @@ async def _mqtt_loop():
                     await ha_mqtt.publish_state(client, serial, cfg, state, plans=plans)
                     await ha_mqtt.publish_availability(client, serial, True)
 
+                # Reconcile persisted desired Polar schedules immediately on
+                # every reconnect, including after an offline edit.
+                await reconcile_schedules(force=True)
+
                 async for message in client.messages:
                     if _reconnect_event and _reconnect_event.is_set():
                         break
@@ -1552,6 +1813,7 @@ async def _mqtt_loop():
             await asyncio.sleep(10)
         finally:
             _client_ref = None
+            _last_polar_plans.clear()
             for serial in _devices:
                 _mark_offline(serial)
             for serial in list(_devices):
@@ -1608,13 +1870,23 @@ def redact_payload(payload_str: str) -> str:
 
 
 _watchdog_task: asyncio.Task | None = None
+_schedule_task: asyncio.Task | None = None
+_schedule_reconcile_lock: asyncio.Lock | None = None
+_last_polar_plans: dict[str, list] = {}
 
 async def start():
-    global _client_task, _watchdog_task, _reconnect_event
+    global _client_task, _watchdog_task, _schedule_task, _reconnect_event
     _reconnect_event = asyncio.Event()
+    # Safe startup recovery materializes the current occurrence even when the
+    # MQTT broker is unavailable; the desired state remains on disk for the
+    # next connection.
+    await reconcile_schedules()
     if _client_task is None or _client_task.done():
         _client_task = asyncio.ensure_future(_mqtt_loop())
         _LOGGER.info("MQTT client task started")
     if _watchdog_task is None or _watchdog_task.done():
         _watchdog_task = asyncio.ensure_future(_offline_watchdog())
         _LOGGER.info("Offline watchdog started (threshold=%ds)", WATCHDOG_SECS)
+    if _schedule_task is None or _schedule_task.done():
+        _schedule_task = asyncio.ensure_future(_schedule_loop())
+        _LOGGER.info("Polar schedule reconciliation started")

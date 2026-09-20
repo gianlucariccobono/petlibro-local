@@ -8,9 +8,13 @@ All state lives in /data/petlibro_local.json with top-level keys:
 """
 
 import datetime
+import copy
 import json
 import logging
 import os
+import re
+import uuid
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -107,7 +111,9 @@ _DEVICE_DEFAULTS = {
 
 def _load() -> dict:
     if not os.path.exists(DATA_FILE):
-        return {"devices": {}, "pets": {}, "settings": {}, "intake": {}}
+        return {"devices": {}, "pets": {}, "settings": {}, "intake": {},
+                "_schedules": {}, "_schedule_materializations": [],
+                "_feeding_plans_view": {}}
     try:
         with open(DATA_FILE) as f:
             data = json.load(f)
@@ -115,10 +121,15 @@ def _load() -> dict:
         data.setdefault("pets", {})
         data.setdefault("settings", {})
         data.setdefault("intake", {})
+        data.setdefault("_schedules", {})
+        data.setdefault("_schedule_materializations", [])
+        data.setdefault("_feeding_plans_view", {})
         return data
     except Exception:
         _LOGGER.exception("Failed to load data file, starting fresh")
-        return {"devices": {}, "pets": {}, "settings": {}, "intake": {}}
+        return {"devices": {}, "pets": {}, "settings": {}, "intake": {},
+                "_schedules": {}, "_schedule_materializations": [],
+                "_feeding_plans_view": {}}
 
 
 def _save(data: dict):
@@ -179,6 +190,18 @@ def delete_device(serial: str):
     data.get("intake", {}).pop(serial, None)
     data.get("_feeder_log", {}).pop(serial, None)
     data.get("_fountain_log", {}).pop(serial, None)
+    # A deleted device cannot remain a target of a global schedule.  Keep the
+    # schedule itself (it may still target other Polar devices), but remove
+    # only this device's reference and materializations.
+    schedules = data.get("_schedules", {})
+    for schedule_id, schedule in list(schedules.items()):
+        if serial in schedule.get("device_serials", []):
+            schedule["device_serials"] = [s for s in schedule["device_serials"] if s != serial]
+    data["_schedule_materializations"] = [
+        item for item in data.get("_schedule_materializations", [])
+        if item.get("serial") != serial
+    ]
+    data.get("_feeding_plans_view", {}).pop(serial, None)
     _save(data)
 
 
@@ -236,13 +259,216 @@ def save_alert_last_fired(serial: str, alert: str, ts: float):
 
 
 def get_device_feeding_plans(serial: str) -> list:
-    return _load().get("_feeding_plans", {}).get(serial, [])
+    data = _load()
+    # The view is the composed legacy + managed list used by the existing UI,
+    # HA state, and readback path.  _feeding_plans itself remains the original
+    # unmanaged snapshot and is never rewritten by reconciliation.
+    view = data.get("_feeding_plans_view", {})
+    if serial in view:
+        return copy.deepcopy(view[serial])
+    return copy.deepcopy(data.get("_feeding_plans", {}).get(serial, []))
+
+
+def get_legacy_device_feeding_plans(serial: str) -> list:
+    """Return the untouched legacy _feeding_plans snapshot for a device."""
+    return copy.deepcopy(_load().get("_feeding_plans", {}).get(serial, []))
 
 
 def save_device_feeding_plans(serial: str, plans: list):
+    """Store an explicit legacy snapshot.
+
+    New schedule code must not call this function.  It exists for backwards
+    compatibility with the old storage API and deliberately does not merge,
+    normalize, or otherwise mutate the supplied plan dictionaries.
+    """
     data = _load()
-    data.setdefault("_feeding_plans", {})[serial] = plans
+    data.setdefault("_feeding_plans", {})[serial] = copy.deepcopy(plans)
     _save(data)
+
+
+def save_composed_device_feeding_plans(serial: str, plans: list):
+    """Refresh the compatibility view without touching the legacy snapshot."""
+    data = _load()
+    copied = copy.deepcopy(plans)
+    if data.setdefault("_feeding_plans_view", {}).get(serial) != copied:
+        data["_feeding_plans_view"][serial] = copied
+        _save(data)
+
+
+# ── Global Polar schedules ───────────────────────────────────────────────────
+
+_SCHEDULE_TIME_RE = re.compile(r"^(?:[01]\d|2[0-3]):[0-5]\d$")
+
+
+def validate_schedule_definition(value: dict, schedule_id: str | None = None) -> dict:
+    """Validate and normalize one complete global schedule definition."""
+    if not isinstance(value, dict):
+        raise ValueError("Schedule must be an object")
+    allowed = {"id", "name", "enabled", "kind", "local_date", "local_time",
+               "timezone", "plate", "feeding_duration", "device_serials"}
+    unknown = set(value) - allowed
+    if unknown:
+        raise ValueError(f"Unknown schedule field: {sorted(unknown)[0]}")
+
+    raw_id = schedule_id or value.get("id")
+    if raw_id is None:
+        raw_id = str(uuid.uuid4())
+    try:
+        normalized_id = str(uuid.UUID(str(raw_id)))
+    except (ValueError, AttributeError, TypeError) as exc:
+        raise ValueError("Schedule id must be a UUID") from exc
+    if schedule_id is not None:
+        try:
+            path_id = str(uuid.UUID(str(schedule_id)))
+        except (ValueError, AttributeError, TypeError) as exc:
+            raise ValueError("Schedule id must be a UUID") from exc
+        if normalized_id != path_id:
+            raise ValueError("Schedule id cannot be changed")
+
+    name = value.get("name")
+    if name is not None and not isinstance(name, str):
+        raise ValueError("Schedule name must be a string or null")
+    if name is not None and len(name) > 200:
+        raise ValueError("Schedule name is too long")
+    if type(value.get("enabled")) is not bool:
+        raise ValueError("Schedule enabled must be boolean")
+    kind = value.get("kind")
+    if kind not in ("daily", "date"):
+        raise ValueError("Schedule kind must be daily or date")
+
+    local_date = value.get("local_date")
+    if kind == "date":
+        if not isinstance(local_date, str):
+            raise ValueError("Date schedules require local_date")
+        try:
+            datetime.date.fromisoformat(local_date)
+        except ValueError as exc:
+            raise ValueError("local_date must be YYYY-MM-DD") from exc
+    elif local_date is not None:
+        raise ValueError("Daily schedules cannot have local_date")
+
+    local_time = value.get("local_time")
+    if not isinstance(local_time, str) or not _SCHEDULE_TIME_RE.fullmatch(local_time):
+        raise ValueError("local_time must be HH:MM")
+    timezone = value.get("timezone")
+    if not isinstance(timezone, str) or not timezone:
+        raise ValueError("timezone must be an IANA timezone")
+    try:
+        ZoneInfo(timezone)
+    except ZoneInfoNotFoundError as exc:
+        raise ValueError("timezone must be a valid IANA timezone") from exc
+    if schedule_id is not None:
+        existing = get_schedule(str(uuid.UUID(str(schedule_id))))
+        if existing and timezone != existing.get("timezone"):
+            raise ValueError("Schedule timezone cannot be changed")
+
+    if value["enabled"] and kind == "date":
+        occurrence = localize_schedule_datetime(
+            datetime.date.fromisoformat(local_date), local_time, timezone,
+        )
+        if occurrence is None:
+            raise ValueError("local_time is nonexistent on local_date in timezone")
+        now = datetime.datetime.now(datetime.timezone.utc)
+        if occurrence <= now.astimezone(ZoneInfo(timezone)):
+            raise ValueError("Specific-date schedule occurrence has already passed")
+
+    plate = value.get("plate")
+    if type(plate) is not int or not 1 <= plate <= 3:
+        raise ValueError("plate must be between 1 and 3")
+    duration = value.get("feeding_duration")
+    if type(duration) is not int or not 1 <= duration <= 1440:
+        raise ValueError("feeding_duration must be between 1 and 1440 minutes")
+    serials = value.get("device_serials")
+    if not isinstance(serials, list) or any(not isinstance(s, str) or not s for s in serials):
+        raise ValueError("device_serials must be an array of serials")
+    if len(set(serials)) != len(serials):
+        raise ValueError("device_serials must not contain duplicates")
+    devices = get_devices()
+    for serial in serials:
+        if devices.get(serial, {}).get("device_type") != "polar":
+            raise ValueError(f"Schedule device {serial} is not a mapped Polar device")
+
+    return {
+        "id": normalized_id,
+        "name": name,
+        "enabled": value["enabled"],
+        "kind": kind,
+        "local_date": local_date if kind == "date" else None,
+        "local_time": local_time,
+        "timezone": timezone,
+        "plate": plate,
+        "feeding_duration": duration,
+        "device_serials": list(serials),
+    }
+
+
+def localize_schedule_datetime(
+    local_date: datetime.date,
+    local_time: str,
+    timezone: str | ZoneInfo,
+) -> datetime.datetime | None:
+    """Resolve a wall time using the same DST round-trip rule as materialization."""
+    tz = ZoneInfo(timezone) if isinstance(timezone, str) else timezone
+    naive = datetime.datetime.combine(local_date, datetime.time.fromisoformat(local_time))
+    for fold in (0, 1):
+        candidate = naive.replace(tzinfo=tz, fold=fold)
+        if candidate.astimezone(datetime.timezone.utc).astimezone(tz).replace(tzinfo=None) == naive:
+            return candidate
+    return None
+
+
+def get_schedules() -> list:
+    schedules = _load().get("_schedules", {})
+    return copy.deepcopy(list(schedules.values()))
+
+
+def get_schedule(schedule_id: str) -> dict | None:
+    schedule = _load().get("_schedules", {}).get(schedule_id)
+    return copy.deepcopy(schedule) if schedule is not None else None
+
+
+def save_schedule(schedule: dict) -> dict:
+    data = _load()
+    data.setdefault("_schedules", {})[schedule["id"]] = copy.deepcopy(schedule)
+    _save(data)
+    return copy.deepcopy(schedule)
+
+
+def delete_schedule(schedule_id: str) -> bool:
+    data = _load()
+    existed = data.get("_schedules", {}).pop(schedule_id, None) is not None
+    data["_schedule_materializations"] = [
+        item for item in data.get("_schedule_materializations", [])
+        if item.get("scheduleId") != schedule_id
+    ]
+    for serial, plans in list(data.get("_feeding_plans_view", {}).items()):
+        # Reconciliation will replace this view; dropping it avoids exposing a
+        # deleted managed plan during the short transition.
+        data["_feeding_plans_view"].pop(serial, None)
+    _save(data)
+    return existed
+
+
+def drop_schedule_materializations(schedule_id: str):
+    """Remove one schedule's generated plans before an explicit definition edit."""
+    data = _load()
+    current = data.get("_schedule_materializations", [])
+    remaining = [item for item in current if item.get("scheduleId") != schedule_id]
+    if remaining != current:
+        data["_schedule_materializations"] = remaining
+        _save(data)
+
+
+def get_schedule_materializations() -> list:
+    return copy.deepcopy(_load().get("_schedule_materializations", []))
+
+
+def replace_schedule_materializations(materializations: list):
+    data = _load()
+    current = data.get("_schedule_materializations", [])
+    if current != materializations:
+        data["_schedule_materializations"] = copy.deepcopy(materializations)
+        _save(data)
 
 
 # ── Feeder activity log ───────────────────────────────────────────────────────

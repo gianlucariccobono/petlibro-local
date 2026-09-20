@@ -250,11 +250,19 @@ async def handle_api_device_post(request):
     serial = request.match_info["serial"]
     try:
         data = await request.json()
+        current = storage.get_devices().get(serial, {})
+        proposed = {**current, **data}
+        if (
+            proposed.get("device_type") == "polar"
+            and current.get("device_type") != "polar"
+        ):
+            devices.validate_device_schedule_capacity(serial, proposed)
         device = storage.save_device(serial, data)
         model = device.get("model", "")
         device_type = device.get("device_type", "")
         if model:
             devices.register_device(serial, model, device_type)
+        await devices.reconcile_schedules(serials={serial})
         if device_type == "one_rfid" and ("display_text" in data or "display_icon" in data):
             asyncio.ensure_future(devices.send_display(
                 serial,
@@ -263,6 +271,8 @@ async def handle_api_device_post(request):
             ))
         asyncio.ensure_future(devices.republish_ha_discovery(serial))
         return web.json_response(device)
+    except ValueError as exc:
+        return web.Response(status=400, text=str(exc))
     except Exception:
         _LOGGER.exception("Failed to save device %s...", serial[:6])
         return web.Response(status=400, text="Bad request")
@@ -274,11 +284,14 @@ async def handle_api_device_add(request):
         serial = data.get("serial", "").strip().upper()
         if not serial:
             return web.Response(status=400, text="serial required")
+        if data.get("device_type") == "polar":
+            devices.validate_device_schedule_capacity(serial, data)
         device = storage.save_device(serial, data)
         model = device.get("model", "")
         device_type = device.get("device_type", "")
         if model:
             devices.register_device(serial, model, device_type)
+        await devices.reconcile_schedules(serials={serial})
         # Ensure device credentials are in Mosquitto.
         # add_mosquitto_login is idempotent — returns True immediately if already present.
         # If credentials were newly added we restart Mosquitto so it picks them up.
@@ -305,6 +318,8 @@ async def handle_api_device_add(request):
                     serial[:6],
                 )
         return web.json_response(device)
+    except ValueError as exc:
+        return web.Response(status=400, text=str(exc))
     except Exception:
         _LOGGER.exception("Failed to add device")
         return web.Response(status=400, text="Bad request")
@@ -322,6 +337,7 @@ async def handle_api_device_delete(request):
     await devices.retract_ha_discovery(serial, deleted_cfg, deleted_state)
     storage.delete_device(serial)
     devices.unregister_device(serial)
+    await devices.reconcile_schedules()
 
     if remove_creds and mqtt_user:
         # Check if any remaining device shares this username.
@@ -754,16 +770,16 @@ async def handle_api_feeding_plans_get(request):
 
 async def handle_api_feeding_plans_post(request):
     serial = request.match_info["serial"]
+    if storage.get_devices().get(serial, {}).get("device_type") == "polar":
+        # Global schedules are the only supported source of Polar plans.
+        return web.Response(status=405, text="Raw Polar feeding-plan writes are not supported; use /api/schedules")
     try:
         plans = await request.json()
         if not isinstance(plans, list):
             return web.Response(status=400, text="Expected a JSON array")
-        is_polar = storage.get_devices().get(serial, {}).get("device_type") == "polar"
-        if is_polar:
-            ok = await devices.send_polar_feeding_plans(serial, plans)
-        else:
-            ok = await devices.send_feeding_plans(serial, plans)
+        ok = await devices.send_feeding_plans(serial, plans)
         storage.save_device_feeding_plans(serial, plans)
+        storage.save_composed_device_feeding_plans(serial, plans)
         asyncio.ensure_future(devices.republish_ha_discovery(serial))
         return web.json_response({"status": "ok", "mqtt": ok})
     except ValueError as exc:
@@ -771,6 +787,55 @@ async def handle_api_feeding_plans_post(request):
     except Exception:
         _LOGGER.exception("Feeding plans update failed for %s...", serial[:6])
         return web.Response(status=400, text="Bad request")
+
+
+async def handle_api_schedules_get(request):
+    return web.json_response(storage.get_schedules())
+
+
+async def handle_api_schedule_get(request):
+    schedule = storage.get_schedule(request.match_info["id"])
+    if schedule is None:
+        return web.Response(status=404, text="Schedule not found")
+    return web.json_response(schedule)
+
+
+async def handle_api_schedule_post(request):
+    schedule_id = request.match_info.get("id")
+    try:
+        data = await request.json()
+        if schedule_id:
+            if storage.get_schedule(schedule_id) is None:
+                return web.Response(status=404, text="Schedule not found")
+            schedule = storage.validate_schedule_definition(data, schedule_id=schedule_id)
+            devices.validate_schedule_capacity(schedule, replacing_id=schedule_id)
+        else:
+            schedule = storage.validate_schedule_definition(data)
+            if storage.get_schedule(schedule["id"]) is not None:
+                return web.Response(status=409, text="Schedule already exists")
+            devices.validate_schedule_capacity(schedule)
+        storage.save_schedule(schedule)
+        if schedule_id:
+            # An explicit edit is the one operation allowed to replace an
+            # immutable current-day materialization.  Reconciliation then
+            # creates a new payload/plan ID from the edited definition.
+            storage.drop_schedule_materializations(schedule["id"])
+        await devices.reconcile_schedules(force=True)
+        return web.json_response(schedule)
+    except ValueError as exc:
+        return web.Response(status=400, text=str(exc))
+    except Exception:
+        _LOGGER.exception("Schedule update failed")
+        return web.Response(status=400, text="Bad request")
+
+
+async def handle_api_schedule_delete(request):
+    schedule_id = request.match_info["id"]
+    if storage.get_schedule(schedule_id) is None:
+        return web.Response(status=404, text="Schedule not found")
+    storage.delete_schedule(schedule_id)
+    await devices.reconcile_schedules(force=True)
+    return web.json_response({"status": "ok"})
 
 
 async def handle_api_device_image_upload(request):
@@ -855,6 +920,11 @@ def main():
     app.router.add_get("/api/devices/{serial}/fountain-log",   handle_api_fountain_log)
     app.router.add_get("/api/devices/{serial}/feeding-plans",  handle_api_feeding_plans_get)
     app.router.add_post("/api/devices/{serial}/feeding-plans", handle_api_feeding_plans_post)
+    app.router.add_get("/api/schedules",                    handle_api_schedules_get)
+    app.router.add_post("/api/schedules",                   handle_api_schedule_post)
+    app.router.add_get("/api/schedules/{id}",               handle_api_schedule_get)
+    app.router.add_post("/api/schedules/{id}",              handle_api_schedule_post)
+    app.router.add_delete("/api/schedules/{id}",            handle_api_schedule_delete)
     app.router.add_post("/api/devices/{serial}/image",         handle_api_device_image_upload)
     app.router.add_post("/api/devices/{serial}/push-audio",    handle_api_device_push_audio)
 
