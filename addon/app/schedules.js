@@ -59,9 +59,22 @@ function _scheduleRow(s) {
 function renderSchedules() {
   const root = document.getElementById("schedules-panel");
   if (!root) return;
-  root.innerHTML = `<div class="schedules-head"><div><div class="tab-section-heading">${t("schedules.heading")}</div><p class="form-hint">${t("schedules.description")}</p></div><button class="btn-primary" id="sc-add">${t("schedules.add")}</button></div><div id="schedules-content"><p class="schedule-state">${t("schedules.loading")}</p></div>`;
+  root.innerHTML = `<div class="schedules-head"><div><div class="tab-section-heading">${t("schedules.heading")}</div><p class="form-hint">${t("schedules.description")}</p></div><div class="schedule-head-actions"><button class="btn-secondary" id="sc-resend">${t("schedules.resend")}</button><button class="btn-primary" id="sc-add">${t("schedules.add")}</button></div></div><div id="schedules-content"><p class="schedule-state">${t("schedules.loading")}</p></div>`;
   api("GET", "/api/schedules").then(data => { _schedules = _scheduleItems(data); _renderScheduleContent(); }).catch(() => { document.getElementById("schedules-content").innerHTML = `<p class="schedule-state error">${t("schedules.error")}</p>`; });
   document.getElementById("sc-add").onclick = () => { _creatingSchedule = true; _editingSchedule = {}; _renderScheduleContent(); };
+  document.getElementById("sc-resend").onclick = async () => {
+    if (!confirm(t("schedules.resend_confirm"))) return;
+    const button = document.getElementById("sc-resend");
+    button.disabled = true;
+    try {
+      await api("POST", "/api/schedules/reconcile");
+      showToast(t("schedules.resend_success"));
+    } catch (e) {
+      showToast(t("schedules.resend_error"));
+    } finally {
+      button.disabled = false;
+    }
+  };
 }
 function _renderScheduleContent() {
   const root = document.getElementById("schedules-content"); if (!root) return;

@@ -19,7 +19,7 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name
 logging.getLogger("aiohttp.access").setLevel(logging.WARNING)
 _LOGGER = logging.getLogger(__name__)
 
-VERSION = "2026.08.14"
+VERSION = "2026.08.16"
 
 # Credential capture state
 _capture_state: dict = {"status": "idle", "result": {}}
@@ -413,6 +413,8 @@ async def handle_api_device_command(request):
         if result is False:
             return web.Response(status=503, text="Device is offline or did not accept the command")
         return web.json_response({"status": "ok"})
+    except ValueError as exc:
+        return web.Response(status=400, text=str(exc))
     except Exception:
         _LOGGER.exception("Command failed for %s...", serial[:6])
         return web.Response(status=400, text="Bad request")
@@ -793,6 +795,17 @@ async def handle_api_schedules_get(request):
     return web.json_response(storage.get_schedules())
 
 
+async def handle_api_schedules_reconcile(request):
+    try:
+        reconciled = await devices.reconcile_schedules(force=True)
+        return web.json_response({"status": "ok", "reconciled": reconciled})
+    except ValueError as exc:
+        return web.Response(status=400, text=str(exc))
+    except Exception:
+        _LOGGER.exception("Schedule reconciliation failed")
+        return web.Response(status=400, text="Schedule reconciliation failed")
+
+
 async def handle_api_schedule_get(request):
     schedule = storage.get_schedule(request.match_info["id"])
     if schedule is None:
@@ -922,6 +935,7 @@ def main():
     app.router.add_post("/api/devices/{serial}/feeding-plans", handle_api_feeding_plans_post)
     app.router.add_get("/api/schedules",                    handle_api_schedules_get)
     app.router.add_post("/api/schedules",                   handle_api_schedule_post)
+    app.router.add_post("/api/schedules/reconcile",         handle_api_schedules_reconcile)
     app.router.add_get("/api/schedules/{id}",               handle_api_schedule_get)
     app.router.add_post("/api/schedules/{id}",              handle_api_schedule_post)
     app.router.add_delete("/api/schedules/{id}",            handle_api_schedule_delete)

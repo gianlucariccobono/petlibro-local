@@ -260,9 +260,14 @@ def save_alert_last_fired(serial: str, alert: str, ts: float):
 
 def get_device_feeding_plans(serial: str) -> list:
     data = _load()
-    # The view is the composed legacy + managed list used by the existing UI,
-    # HA state, and readback path.  _feeding_plans itself remains the original
-    # unmanaged snapshot and is never rewritten by reconciliation.
+    # Polar compatibility views are managed-only.  Their old _feeding_plans
+    # entries remain archival data and must never be sent back to the feeder.
+    if data.get("devices", {}).get(serial, {}).get("device_type") == "polar":
+        return copy.deepcopy([
+            item["payload"] for item in data.get("_schedule_materializations", [])
+            if item.get("serial") == serial and isinstance(item.get("payload"), dict)
+        ])
+    # One RFID and other legacy devices retain the historical raw-plan view.
     view = data.get("_feeding_plans_view", {})
     if serial in view:
         return copy.deepcopy(view[serial])

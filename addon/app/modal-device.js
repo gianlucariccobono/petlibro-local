@@ -233,6 +233,7 @@ function buildOverviewTab(device) {
         <input class="form-input" id="polar-plate-position" type="number" min="1" max="3" value="1">
       </div>
       <button class="btn-secondary" id="btn-polar-set-position" style="width:100%">${t("overview.polar_set_position")}</button>
+       
     </div>`;
   }
 
@@ -789,7 +790,7 @@ function wireDeviceTabHandlers(tabName) {
         runPolarAction(setPosition, { _polar_set_plate_position: position },
           t("overview.polar_confirm_position", {position}));
       };
-      return;
+       return;
     }
 
     // Feeder controls

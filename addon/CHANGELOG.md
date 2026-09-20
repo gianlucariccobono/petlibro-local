@@ -5,7 +5,8 @@ For full release notes and details on each version, see the [GitHub Releases pag
 ## Unreleased
 - Fixed Polar Home Assistant MQTT Discovery buttons bypassing the Polar command router and being rejected before reaching the feeder.
 - Added confirmed local controls for the Polar Wet Food Feeder (MQTT model `PLAF109`): serve plates 1-3, stop an active feed, open or close the lid, set the plate position, and request plan readback. These controls are also exposed to Home Assistant through MQTT Discovery.
-- Planned global Polar scheduling: a central Schedules menu will map shared actions to multiple Polars, support daily or specific local date/time entries with shortly-after-midnight rollover, and materialize new immutable MQTT plan objects within each Polar's three-plan capacity; offline Polars will need to sync after reconnecting.
+- Planned global Polar scheduling: a central Schedules menu will map shared actions to multiple Polars, support daily or specific local date/time entries with shortly-after-midnight rollover, and materialize new immutable MQTT plan objects within each Polar's three-plan capacity. Reconciliation clears each Polar's existing plan list and sends only Schedules-menu plans; offline Polars retain their current plans until the next successful sync.
+- Added a global “Resend All Schedules” action that clears each Polar's current plan list and re-sends all global schedule materializations.
 - Blocked Polar plate position 0 after hardware testing showed it can cause continuous rotation. Cooling, sound, and other unobserved commands remain unavailable.
 
 ## 2026.08.8

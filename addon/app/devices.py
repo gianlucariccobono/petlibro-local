@@ -477,11 +477,10 @@ def _managed_plans(records: list, serial: str) -> list:
 
 def _composed_polar_plans(serial: str, records: list | None = None) -> list:
     import storage as _storage
-    legacy = _storage.get_legacy_device_feeding_plans(serial)
     managed = _managed_plans(records if records is not None else _storage.get_schedule_materializations(), serial)
-    # Copying the list/dicts for the compatibility view prevents later MQTT
-    # serialization or UI code from mutating either source snapshot.
-    return [dict(plan) if isinstance(plan, dict) else plan for plan in legacy + managed]
+    # Legacy Polar snapshots are archival only.  The returned list is the sole
+    # active source for Polar compatibility views and MQTT plan replacement.
+    return [dict(plan) for plan in managed]
 
 
 def validate_schedule_capacity(schedule: dict, replacing_id: str | None = None):
@@ -497,8 +496,7 @@ def validate_schedule_capacity(schedule: dict, replacing_id: str | None = None):
     for serial, cfg in device_cfgs.items():
         if cfg.get("device_type") != "polar":
             continue
-        count = len(_storage.get_legacy_device_feeding_plans(serial))
-        count += len(_managed_plans(records, serial))
+        count = len(_managed_plans(records, serial))
         if count > 3:
             raise ValueError(f"Polar device {serial} would have more than three feeding plans")
         try:
@@ -518,8 +516,7 @@ def validate_device_schedule_capacity(serial: str, proposed_cfg: dict):
     for target_serial, cfg in device_configs.items():
         if cfg.get("device_type") != "polar":
             continue
-        total = len(_storage.get_legacy_device_feeding_plans(target_serial))
-        total += len(_managed_plans(records, target_serial))
+        total = len(_managed_plans(records, target_serial))
         if total > 3:
             raise ValueError(f"Polar device {target_serial} would have more than three feeding plans")
         try:
@@ -542,7 +539,7 @@ async def reconcile_schedules(force: bool = False, serials: set[str] | None = No
         for serial, cfg in _storage.get_devices().items():
             if cfg.get("device_type") != "polar":
                 continue
-            total = len(_storage.get_legacy_device_feeding_plans(serial)) + len(_managed_plans(records, serial))
+            total = len(_managed_plans(records, serial))
             if total > 3:
                 _LOGGER.error("Not reconciling Polar %s...: %d plans exceed capacity", serial[:6], total)
                 return False
